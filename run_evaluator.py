@@ -50,6 +50,31 @@ def run_dbt_evaluator(project_dir):
         print(f"Unexpected error: {e}")
         return False
 
+def parse_dbt_show_output(output):
+    """
+    Parse the output from dbt show command which comes in a table format
+    """
+    lines = output.strip().split('\n')
+    if len(lines) < 3:  # Need at least header, separator, and one data row
+        return None
+        
+    # Get headers from first line
+    # Split on | and strip whitespace
+    headers = [col.strip() for col in lines[0].split('|')[1:-1]]
+    
+    # Process data rows
+    data = []
+    for line in lines[2:]:  # Skip the separator line
+        if '|' not in line:  # Skip any non-data lines
+            continue
+        # Split on | and strip whitespace
+        row = [cell.strip() for cell in line.split('|')[1:-1]]
+        if len(row) == len(headers):
+            data.append(row)
+    
+    # Create DataFrame
+    return pd.DataFrame(data, columns=headers)
+
 def get_evaluation_results(project_dir):
     """
     Extract results by running dbt show for each evaluator table
@@ -78,25 +103,20 @@ def get_evaluation_results(project_dir):
             )
             
             if result.returncode == 0:
-                # Try to parse the JSON output from dbt show
-                try:
-                    # Find the JSON part in the output
-                    json_start = result.stdout.find('[')
-                    if json_start != -1:
-                        json_data = result.stdout[json_start:]
-                        data = json.loads(json_data)
-                        # Create a simplified table name without the prefix
-                        simple_name = table.replace('dbt_project_evaluator_', '')
-                        tables[simple_name] = pd.DataFrame(data)
-                    else:
-                        print(f"No data found in output for {table}")
-                except json.JSONDecodeError as e:
-                    print(f"Could not parse JSON for {table}: {e}")
+                # Parse the table-formatted output
+                df = parse_dbt_show_output(result.stdout)
+                if df is not None and not df.empty:
+                    # Create a simplified table name without the prefix
+                    simple_name = table.replace('dbt_project_evaluator_', '')
+                    tables[simple_name] = df
+                else:
+                    print(f"No data found in output for {table}")
             else:
                 print(f"Failed to get results for {table}")
                 print(f"Error: {result.stderr}")
         except Exception as e:
             print(f"Error processing {table}: {e}")
+            print(f"Output was: {result.stdout[:200]}...")  # Print first 200 chars of output
     
     return tables
 
