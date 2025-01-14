@@ -27,6 +27,15 @@ def run_dbt_evaluator(project_dir):
     Run dbt-project-evaluator on specified project directory and return results
     """
     try:
+        # Run parse first
+        print("Parsing project...")
+        parse_result = subprocess.run(
+            ['dbt', 'parse'],
+            capture_output=True,
+            text=True,
+            cwd=project_dir
+        )
+        
         # Run the evaluator models
         print("Running evaluator models...")
         result = subprocess.run(
@@ -50,74 +59,67 @@ def run_dbt_evaluator(project_dir):
         print(f"Unexpected error: {e}")
         return False
 
-def get_mart_tables(project_dir):
+def get_evaluator_models(project_dir):
     """
-    Get the final output tables from dbt-project-evaluator
+    Get list of evaluator models by reading target/manifest.json
     """
-    mart_patterns = [
-        "test_coverage",
-        "model_naming",
-        "exposure_summary",
-        "model_tags",
-        "models_summary",
-        "source_summary",
-        "tests_summary",
-        "models_resources"
-    ]
-    
     try:
-        # List all models in the project's marts directory
-        result = subprocess.run(
-            ['dbt', 'ls', '--resource-type', 'model', '--select', 'dbt_project_evaluator.marts.*'],
-            capture_output=True,
-            text=True,
-            cwd=project_dir
-        )
-        
-        if result.returncode == 0:
-            # Split output into lines and clean up
-            all_tables = [line.strip() for line in result.stdout.split('\n') if line.strip()]
-            
-            # Filter for final output tables
-            mart_tables = [table for table in all_tables 
-                         if any(pattern in table.lower() for pattern in mart_patterns)]
-            
-            print("\nFound evaluator mart tables:")
-            for name in mart_tables:
-                print(f"- {name}")
-            return mart_tables
-        else:
-            print("Failed to list models:")
-            print(result.stderr)
+        manifest_path = Path(project_dir) / 'target' / 'manifest.json'
+        if not manifest_path.exists():
+            print("manifest.json not found. Please ensure dbt compile has run.")
             return []
             
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+        
+        evaluator_models = []
+        for node_name, node in manifest['nodes'].items():
+            if (node['resource_type'] == 'model' and 
+                'dbt_project_evaluator' in node['package_name'] and
+                node.get('config', {}).get('materialized') == 'table'):
+                evaluator_models.append(node['name'])
+        
+        print("\nFound evaluator models:")
+        for model in evaluator_models:
+            print(f"- {model}")
+            
+        return evaluator_models
+        
     except Exception as e:
-        print(f"Error getting table names: {e}")
+        print(f"Error reading manifest: {e}")
         return []
 
-def get_table_contents(project_dir, table_name):
+def create_temp_macro(project_dir, table_name):
     """
-    Get contents of a table using dbt run-operation
+    Create a temporary macro to query the table
     """
-    try:
-        # Create a macro to select from the table
-        macro_content = f"""
+    macro_content = f"""
 {{% macro get_table_data() %}}
     {{% set query %}}
-        select * from {{{{ ref('{table_name}') }}}}
+        select *
+        from {{{{ target.schema }}}}.{table_name}
     {{% endset %}}
     
     {{% if execute %}}
-        {{% set results = run_query(query) %}}
-        {{% set results_json = tojson(results.rows) %}}
-        {{% do log(results_json, info=True) %}}
+        {{{{ log(tojson(run_query(query).rows), info=True) }}}}
     {{% endif %}}
 {{% endmacro %}}
 """
-        # Write the macro to a temporary file
-        macro_path = Path(project_dir) / 'macros' / 'temp_get_data.sql'
-        macro_path.parent.mkdir(exist_ok=True)
-        macro_path.write_text(macro_content)
+    macro_dir = Path(project_dir) / 'macros'
+    macro_dir.mkdir(exist_ok=True)
+    
+    macro_path = macro_dir / 'temp_get_data.sql'
+    with open(macro_path, 'w') as f:
+        f.write(macro_content)
+    return macro_path
+
+def get_table_data(project_dir, table_name):
+    """
+    Get the data from a single table
+    """
+    try:
+        # Create temporary macro
+        macro_path = create_temp_macro(project_dir, table_name)
         
         # Run the macro
         result = subprocess.run(
@@ -127,56 +129,51 @@ def get_table_contents(project_dir, table_name):
             cwd=project_dir
         )
         
-        # Clean up the temporary macro
+        # Clean up
         macro_path.unlink()
         
         if result.returncode == 0:
-            # Find the JSON in the output
-            start_idx = result.stdout.find('[')
-            if start_idx != -1:
-                json_str = result.stdout[start_idx:]
-                try:
-                    data = json.loads(json_str)
-                    return pd.DataFrame(data)
-                except json.JSONDecodeError:
-                    print(f"Could not parse JSON output for {table_name}")
-            else:
-                print(f"No data found in output for {table_name}")
+            # Look for JSON data in the output
+            for line in result.stdout.split('\n'):
+                if line.strip().startswith('['):
+                    try:
+                        data = json.loads(line.strip())
+                        return pd.DataFrame(data)
+                    except json.JSONDecodeError:
+                        continue
         else:
-            print(f"Failed to get data for {table_name}")
-            print(f"Error: {result.stderr}")
+            print(f"Error running macro for {table_name}:")
+            print(result.stderr)
         
     except Exception as e:
-        print(f"Error getting table contents: {e}")
+        print(f"Error getting data for {table_name}: {e}")
     
     return None
 
 def get_evaluation_results(project_dir):
     """
-    Extract results for each mart table
+    Get results from all evaluator models
     """
-    # Get mart table names
-    mart_tables = get_mart_tables(project_dir)
+    # Get list of evaluator models
+    evaluator_models = get_evaluator_models(project_dir)
     
-    if not mart_tables:
-        print("No mart tables found!")
+    if not evaluator_models:
+        print("No evaluator models found!")
         return None
     
+    # Get data from each model
     tables = {}
-    for full_table_name in mart_tables:
-        # Extract the simple table name
-        table_name = full_table_name.split('.')[-1]
-        print(f"\nFetching results for {table_name}...")
-        
-        df = get_table_contents(project_dir, table_name)
+    for model_name in evaluator_models:
+        print(f"\nFetching data from {model_name}...")
+        df = get_table_data(project_dir, model_name)
         if df is not None and not df.empty:
-            tables[table_name] = df
+            tables[model_name] = df
     
     return tables
 
 def export_to_csv(tables, output_dir):
     """
-    Export each result table to a separate CSV file
+    Export each table to a CSV file
     """
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
