@@ -15,16 +15,24 @@ def get_evaluator_results(project_dir):
         with open(manifest_path) as f:
             manifest = json.load(f)
 
+        # Get target config
+        with open(Path(project_dir) / 'target' / 'compiled' / 'dbt_project.yml') as f:
+            target_config = json.load(f)
+            print(f"Using schema: {target_config.get('target_schema', 'default schema')}")
+
         # Find all result models
         result_models = []
         for node_name, node in manifest['nodes'].items():
             if ('dbt_project_evaluator' in node['package_name'] and 
                 node['resource_type'] == 'model' and
-                any(x in node['name'] for x in ['summary', 'coverage', 'resources', 'model_'])):
+                any(x in node['name'] for x in ['coverage', 'model_', 'summary', 'resources'])):
+                
+                # Get the relation info
                 model_info = {
                     'name': node['name'],
-                    'database': node.get('database', ''),
-                    'schema': node.get('config', {}).get('schema'),
+                    'relation_name': node.get('relation_name'),
+                    'schema': node.get('schema'),
+                    'database': node.get('database'),
                     'materialized': node.get('config', {}).get('materialized', 'view')
                 }
                 result_models.append(model_info)
@@ -32,6 +40,8 @@ def get_evaluator_results(project_dir):
         print("\nFound result models:")
         for model in result_models:
             print(f"- {model['name']} ({model['materialized']})")
+            if model.get('relation_name'):
+                print(f"  Relation: {model['relation_name']}")
 
         # Query each model and store results
         results = {}
@@ -43,7 +53,7 @@ def get_evaluator_results(project_dir):
 {{% macro get_model_data() %}}
     {{% set query %}}
         select *
-        from {{{{ target.database }}}}.{{{{ target.schema }}}}.{model['name']}
+        from {{{{ ref('{model['name']}') }}}}
     {{% endset %}}
     
     {{% if execute %}}
@@ -61,6 +71,7 @@ def get_evaluator_results(project_dir):
                     f.write(macro_content)
 
                 # Run macro
+                print(f"Running query for {model['name']}...")
                 result = subprocess.run(
                     ['dbt', 'run-operation', 'get_model_data'],
                     capture_output=True,
@@ -73,18 +84,25 @@ def get_evaluator_results(project_dir):
 
                 if result.returncode == 0:
                     # Parse output for JSON data
+                    json_data = None
                     for line in result.stdout.split('\n'):
                         if line.strip().startswith('['):
                             try:
-                                data = json.loads(line.strip())
-                                if data:  # Only store if we got data
-                                    results[model['name']] = pd.DataFrame(data)
-                                    print(f"Successfully retrieved data from {model['name']}")
+                                json_data = json.loads(line.strip())
                                 break
                             except json.JSONDecodeError:
                                 continue
+                    
+                    if json_data:
+                        results[model['name']] = pd.DataFrame(json_data)
+                        print(f"Successfully retrieved data from {model['name']}")
+                    else:
+                        print(f"No data found in {model['name']}")
+                        print("Output was:")
+                        print(result.stdout[:500])  # Print first 500 chars of output
                 else:
                     print(f"Failed to query {model['name']}")
+                    print("Error was:")
                     print(result.stderr)
 
             except Exception as e:
