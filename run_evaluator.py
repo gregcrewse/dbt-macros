@@ -50,6 +50,35 @@ def run_dbt_evaluator(project_dir):
         print(f"Unexpected error: {e}")
         return False
 
+def get_evaluator_table_names(project_dir):
+    """
+    Get the actual table names created by dbt-project-evaluator
+    """
+    try:
+        # List all models in the dbt project
+        result = subprocess.run(
+            ['dbt', 'ls', '--resource-type', 'model', '--select', 'package:dbt_project_evaluator'],
+            capture_output=True,
+            text=True,
+            cwd=project_dir
+        )
+        
+        if result.returncode == 0:
+            # Split output into lines and clean up
+            table_names = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+            print("\nFound evaluator tables:")
+            for name in table_names:
+                print(f"- {name}")
+            return table_names
+        else:
+            print("Failed to list models:")
+            print(result.stderr)
+            return []
+            
+    except Exception as e:
+        print(f"Error getting table names: {e}")
+        return []
+
 def parse_dbt_show_output(output):
     """
     Parse the output from dbt show command which comes in a table format
@@ -59,7 +88,6 @@ def parse_dbt_show_output(output):
         return None
         
     # Get headers from first line
-    # Split on | and strip whitespace
     headers = [col.strip() for col in lines[0].split('|')[1:-1]]
     
     # Process data rows
@@ -67,7 +95,6 @@ def parse_dbt_show_output(output):
     for line in lines[2:]:  # Skip the separator line
         if '|' not in line:  # Skip any non-data lines
             continue
-        # Split on | and strip whitespace
         row = [cell.strip() for cell in line.split('|')[1:-1]]
         if len(row) == len(headers):
             data.append(row)
@@ -79,22 +106,18 @@ def get_evaluation_results(project_dir):
     """
     Extract results by running dbt show for each evaluator table
     """
-    evaluator_tables = [
-        'dbt_project_evaluator_exposures_summary',
-        'dbt_project_evaluator_model_naming',
-        'dbt_project_evaluator_model_tags',
-        'dbt_project_evaluator_models_resources',
-        'dbt_project_evaluator_models_summary',
-        'dbt_project_evaluator_sources_summary',
-        'dbt_project_evaluator_test_coverage',
-        'dbt_project_evaluator_tests_summary'
-    ]
+    # Get actual table names from the project
+    evaluator_tables = get_evaluator_table_names(project_dir)
+    
+    if not evaluator_tables:
+        print("No evaluator tables found!")
+        return None
     
     tables = {}
     for table in evaluator_tables:
-        print(f"Fetching results for {table}...")
+        print(f"\nFetching results for {table}...")
         try:
-            # Use dbt show to get the table contents
+            # First try dbt show
             result = subprocess.run(
                 ['dbt', 'show', '--select', table],
                 capture_output=True,
@@ -106,8 +129,8 @@ def get_evaluation_results(project_dir):
                 # Parse the table-formatted output
                 df = parse_dbt_show_output(result.stdout)
                 if df is not None and not df.empty:
-                    # Create a simplified table name without the prefix
-                    simple_name = table.replace('dbt_project_evaluator_', '')
+                    # Use the table name without the package prefix as the key
+                    simple_name = table.split('.')[-1]
                     tables[simple_name] = df
                 else:
                     print(f"No data found in output for {table}")
@@ -116,7 +139,6 @@ def get_evaluation_results(project_dir):
                 print(f"Error: {result.stderr}")
         except Exception as e:
             print(f"Error processing {table}: {e}")
-            print(f"Output was: {result.stdout[:200]}...")  # Print first 200 chars of output
     
     return tables
 
