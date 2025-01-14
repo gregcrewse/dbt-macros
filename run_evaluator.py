@@ -5,45 +5,15 @@ from pathlib import Path
 import sys
 import os
 
-def get_evaluator_results(project_dir):
+def query_model(project_dir, model_name):
     """
-    Get results from manifest.json and query each table/view
+    Query a single model using a dbt macro
     """
-    try:
-        # Read manifest.json
-        manifest_path = Path(project_dir) / 'target' / 'manifest.json'
-        with open(manifest_path) as f:
-            manifest = json.load(f)
-
-        # Find all result models
-        result_models = []
-        for node_name, node in manifest['nodes'].items():
-            if ('dbt_project_evaluator' in node['package_name'] and 
-                node['resource_type'] == 'model' and
-                any(x in node['name'] for x in ['coverage', 'model_', 'summary', 'resources'])):
-                
-                model_info = {
-                    'name': node['name'],
-                    'unique_id': node['unique_id'],
-                    'materialized': node.get('config', {}).get('materialized', 'view')
-                }
-                result_models.append(model_info)
-
-        print("\nFound result models:")
-        for model in result_models:
-            print(f"- {model['name']} ({model['materialized']})")
-            print(f"  ID: {model['unique_id']}")
-
-        # Query each model and store results
-        results = {}
-        for model in result_models:
-            print(f"\nFetching data from {model['name']}...")
-            
-            # Create macro to query the model
-            macro_content = f"""
-{{% macro get_model_data() %}}
+    # Create the macro content
+    macro_content = f"""
+{{% macro get_data() %}}
     {{% set query %}}
-        select * from {{{{ ref('{model["name"]}') }}}}
+        select * from {{{{ ref('{model_name}') }}}}
     {{% endset %}}
     
     {{% if execute %}}
@@ -51,77 +21,63 @@ def get_evaluator_results(project_dir):
     {{% endif %}}
 {{% endmacro %}}
 """
-            # Write macro
-            macro_dir = Path(project_dir) / 'macros'
-            macro_dir.mkdir(exist_ok=True)
-            macro_path = macro_dir / 'temp_get_data.sql'
-            
-            try:
-                with open(macro_path, 'w') as f:
-                    f.write(macro_content)
-
-                # Run macro (removed the --vars flag)
-                print(f"Running query for {model['name']}...")
-                result = subprocess.run(
-                    ['dbt', 'run-operation', 'get_model_data'],
-                    capture_output=True,
-                    text=True,
-                    cwd=project_dir
-                )
-
-                # Clean up macro
-                if macro_path.exists():
-                    macro_path.unlink()
-
-                if result.returncode == 0:
-                    # Parse output for JSON data
-                    json_data = None
-                    for line in result.stdout.split('\n'):
-                        if line.strip().startswith('['):
-                            try:
-                                json_data = json.loads(line.strip())
-                                break
-                            except json.JSONDecodeError:
-                                continue
-                    
-                    if json_data:
-                        results[model['name']] = pd.DataFrame(json_data)
-                        print(f"Successfully retrieved data from {model['name']}")
-                    else:
-                        print(f"No data found in {model['name']}")
-                        print("Output was:")
-                        print(result.stdout)
-                else:
-                    print(f"Failed to query {model['name']}")
-                    print("Error was:")
-                    print(result.stderr)
-
-            except Exception as e:
-                print(f"Error processing {model['name']}: {e}")
-                if macro_path.exists():
-                    macro_path.unlink()
-
-        return results
-
-    except Exception as e:
-        print(f"Error: {e}")
-        return None
-
-def export_to_csv(tables, output_dir):
-    """
-    Export each result table to a CSV file
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
     
-    if not tables:
-        print("No tables to export")
-        return
+    # Ensure macros directory exists and write macro
+    macro_dir = Path(project_dir) / 'macros'
+    macro_dir.mkdir(exist_ok=True)
+    macro_path = macro_dir / f'get_{model_name}_data.sql'
+    
+    try:
+        with open(macro_path, 'w') as f:
+            f.write(macro_content)
         
-    for table_name, df in tables.items():
-        file_path = output_path / f"{table_name}.csv"
-        df.to_csv(file_path, index=False)
-        print(f"Exported {table_name} to {file_path}")
+        # Run the macro
+        result = subprocess.run(
+            ['dbt', 'run-operation', f'get_data'],
+            capture_output=True,
+            text=True,
+            cwd=project_dir
+        )
+        
+        # Clean up
+        macro_path.unlink()
+        
+        if result.returncode == 0:
+            # Look for JSON data in output
+            for line in result.stdout.split('\n'):
+                if line.strip().startswith('['):
+                    try:
+                        data = json.loads(line.strip())
+                        return pd.DataFrame(data)
+                    except json.JSONDecodeError:
+                        continue
+        else:
+            print(f"Error querying {model_name}:")
+            print(result.stderr)
+        
+    except Exception as e:
+        print(f"Error processing {model_name}: {e}")
+        if macro_path.exists():
+            macro_path.unlink()
+    
+    return None
+
+def get_evaluator_models(project_dir):
+    """
+    Get list of evaluator output models from manifest
+    """
+    manifest_path = Path(project_dir) / 'target' / 'manifest.json'
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+    
+    models = []
+    for node_name, node in manifest['nodes'].items():
+        if ('dbt_project_evaluator' in node['package_name'] and 
+            node['resource_type'] == 'model' and
+            any(x in node['name'] for x in ['coverage', 'model_', 'summary', 'resources'])):
+            models.append(node['name'])
+    
+    return models
 
 def main():
     if len(sys.argv) < 2:
@@ -134,28 +90,41 @@ def main():
     # Convert to absolute paths
     project_dir = os.path.abspath(project_dir)
     output_dir = os.path.abspath(output_dir)
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
     
-    # First run the evaluator
+    # Run evaluator
     print("Running dbt-project-evaluator...")
     try:
-        subprocess.run(['dbt', 'run', '--select', 'package:dbt_project_evaluator'], 
-                      check=True, 
-                      cwd=project_dir)
+        result = subprocess.run(
+            ['dbt', 'run', '--select', 'package:dbt_project_evaluator'],
+            check=True,
+            cwd=project_dir
+        )
         print("Evaluation completed successfully")
     except subprocess.CalledProcessError as e:
-        print("Failed to run evaluator:")
-        print(e.stderr)
+        print("Failed to run evaluator")
         sys.exit(1)
     
-    # Get and export results
-    print("\nCollecting results...")
-    tables = get_evaluator_results(project_dir)
+    # Get list of models
+    models = get_evaluator_models(project_dir)
+    print("\nFound evaluator models:")
+    for model in models:
+        print(f"- {model}")
     
-    if tables:
-        export_to_csv(tables, output_dir)
-        print(f"\nResults have been exported to {output_dir}/")
-    else:
-        print("Failed to extract results")
+    # Query each model and save results
+    print("\nCollecting results...")
+    for model_name in models:
+        print(f"\nProcessing {model_name}...")
+        df = query_model(project_dir, model_name)
+        if df is not None and not df.empty:
+            output_file = output_path / f"{model_name}.csv"
+            df.to_csv(output_file, index=False)
+            print(f"Exported {model_name} to {output_file}")
+        else:
+            print(f"No data retrieved for {model_name}")
+    
+    print("\nDone!")
 
 if __name__ == "__main__":
     main()
