@@ -5,6 +5,21 @@ from pathlib import Path
 import sys
 import os
 
+def get_target_schema(project_dir):
+    """Get the current target schema from dbt debug"""
+    try:
+        result = subprocess.run(
+            ['dbt', 'debug', '--config-dir'],
+            capture_output=True,
+            text=True,
+            cwd=project_dir
+        )
+        for line in result.stdout.split('\n'):
+            if 'schema' in line.lower():
+                return line.split(':')[1].strip()
+    except:
+        return None
+
 def get_evaluator_results(project_dir):
     """
     Get results from manifest.json and query each table/view
@@ -15,11 +30,6 @@ def get_evaluator_results(project_dir):
         with open(manifest_path) as f:
             manifest = json.load(f)
 
-        # Get target config
-        with open(Path(project_dir) / 'target' / 'compiled' / 'dbt_project.yml') as f:
-            target_config = json.load(f)
-            print(f"Using schema: {target_config.get('target_schema', 'default schema')}")
-
         # Find all result models
         result_models = []
         for node_name, node in manifest['nodes'].items():
@@ -27,12 +37,9 @@ def get_evaluator_results(project_dir):
                 node['resource_type'] == 'model' and
                 any(x in node['name'] for x in ['coverage', 'model_', 'summary', 'resources'])):
                 
-                # Get the relation info
                 model_info = {
                     'name': node['name'],
-                    'relation_name': node.get('relation_name'),
-                    'schema': node.get('schema'),
-                    'database': node.get('database'),
+                    'unique_id': node['unique_id'],
                     'materialized': node.get('config', {}).get('materialized', 'view')
                 }
                 result_models.append(model_info)
@@ -40,8 +47,7 @@ def get_evaluator_results(project_dir):
         print("\nFound result models:")
         for model in result_models:
             print(f"- {model['name']} ({model['materialized']})")
-            if model.get('relation_name'):
-                print(f"  Relation: {model['relation_name']}")
+            print(f"  ID: {model['unique_id']}")
 
         # Query each model and store results
         results = {}
@@ -52,8 +58,7 @@ def get_evaluator_results(project_dir):
             macro_content = f"""
 {{% macro get_model_data() %}}
     {{% set query %}}
-        select *
-        from {{{{ ref('{model['name']}') }}}}
+        select * from {{{{ ref('{model["name"]}') }}}}
     {{% endset %}}
     
     {{% if execute %}}
@@ -73,14 +78,15 @@ def get_evaluator_results(project_dir):
                 # Run macro
                 print(f"Running query for {model['name']}...")
                 result = subprocess.run(
-                    ['dbt', 'run-operation', 'get_model_data'],
+                    ['dbt', 'run-operation', 'get_model_data', '--vars'],
                     capture_output=True,
                     text=True,
                     cwd=project_dir
                 )
 
                 # Clean up macro
-                macro_path.unlink()
+                if macro_path.exists():
+                    macro_path.unlink()
 
                 if result.returncode == 0:
                     # Parse output for JSON data
@@ -99,7 +105,7 @@ def get_evaluator_results(project_dir):
                     else:
                         print(f"No data found in {model['name']}")
                         print("Output was:")
-                        print(result.stdout[:500])  # Print first 500 chars of output
+                        print(result.stdout)
                 else:
                     print(f"Failed to query {model['name']}")
                     print("Error was:")
