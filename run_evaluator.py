@@ -27,20 +27,8 @@ def run_dbt_evaluator(project_dir):
     Run dbt-project-evaluator on specified project directory and return results
     """
     try:
-        # First, run dbt parse to ensure project is compiled
-        parse_result = subprocess.run(
-            ['dbt', 'parse'],
-            capture_output=True,
-            text=True,
-            cwd=project_dir
-        )
-        
-        if parse_result.returncode != 0:
-            print("dbt parse failed:")
-            print(parse_result.stderr)
-            return False
-
-        # Then run the evaluator
+        # Run the evaluator models
+        print("Running evaluator models...")
         result = subprocess.run(
             ['dbt', 'run', '--select', 'package:dbt_project_evaluator'],
             capture_output=True,
@@ -62,47 +50,55 @@ def run_dbt_evaluator(project_dir):
         print(f"Unexpected error: {e}")
         return False
 
-def query_data_from_db():
+def get_evaluation_results(project_dir):
     """
-    Query the results directly from the data warehouse
-    You'll need to modify this based on your data warehouse
+    Extract results by running dbt show for each evaluator table
     """
-    try:
-        # This assumes you're using dbt's default target schema
-        evaluator_tables = [
-            'exposures_summary',
-            'model_naming',
-            'model_tags',
-            'models_resources',
-            'models_summary',
-            'sources_summary',
-            'test_coverage',
-            'tests_summary'
-        ]
-        
-        tables = {}
-        for table in evaluator_tables:
-            # Use dbt's CLI to get the data
+    evaluator_tables = [
+        'dbt_project_evaluator_exposures_summary',
+        'dbt_project_evaluator_model_naming',
+        'dbt_project_evaluator_model_tags',
+        'dbt_project_evaluator_models_resources',
+        'dbt_project_evaluator_models_summary',
+        'dbt_project_evaluator_sources_summary',
+        'dbt_project_evaluator_test_coverage',
+        'dbt_project_evaluator_tests_summary'
+    ]
+    
+    tables = {}
+    for table in evaluator_tables:
+        print(f"Fetching results for {table}...")
+        try:
+            # Use dbt show to get the table contents
             result = subprocess.run(
-                ['dbt', 'run-operation', 'get_evaluator_results', '--args', f'{{"table_name": "{table}"}}'],
+                ['dbt', 'show', '--select', table],
                 capture_output=True,
-                text=True
+                text=True,
+                cwd=project_dir
             )
             
             if result.returncode == 0:
+                # Try to parse the JSON output from dbt show
                 try:
-                    # Try to parse the output as JSON
-                    data = json.loads(result.stdout)
-                    tables[table] = pd.DataFrame(data)
-                except:
-                    print(f"Could not parse results for {table}")
+                    # Find the JSON part in the output
+                    json_start = result.stdout.find('[')
+                    if json_start != -1:
+                        json_data = result.stdout[json_start:]
+                        data = json.loads(json_data)
+                        # Create a simplified table name without the prefix
+                        simple_name = table.replace('dbt_project_evaluator_', '')
+                        tables[simple_name] = pd.DataFrame(data)
+                    else:
+                        print(f"No data found in output for {table}")
+                except json.JSONDecodeError as e:
+                    print(f"Could not parse JSON for {table}: {e}")
             else:
                 print(f"Failed to get results for {table}")
-                
-        return tables
-    except Exception as e:
-        print(f"Error querying results: {e}")
-        return None
+                print(f"Error: {result.stderr}")
+        except Exception as e:
+            print(f"Error processing {table}: {e}")
+    
+    return tables
 
 def export_to_csv(tables, output_dir):
     """
@@ -142,7 +138,7 @@ def main():
         print("Evaluation completed successfully")
         
         print("Collecting results...")
-        tables = query_data_from_db()
+        tables = get_evaluation_results(project_dir)
         
         if tables:
             export_to_csv(tables, output_dir)
