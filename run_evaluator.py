@@ -5,21 +5,6 @@ from pathlib import Path
 import sys
 import os
 
-def get_target_schema(project_dir):
-    """Get the current target schema from dbt debug"""
-    try:
-        result = subprocess.run(
-            ['dbt', 'debug', '--config-dir'],
-            capture_output=True,
-            text=True,
-            cwd=project_dir
-        )
-        for line in result.stdout.split('\n'):
-            if 'schema' in line.lower():
-                return line.split(':')[1].strip()
-    except:
-        return None
-
 def get_evaluator_results(project_dir):
     """
     Get results from manifest.json and query each table/view
@@ -75,10 +60,10 @@ def get_evaluator_results(project_dir):
                 with open(macro_path, 'w') as f:
                     f.write(macro_content)
 
-                # Run macro
+                # Run macro (removed the --vars flag)
                 print(f"Running query for {model['name']}...")
                 result = subprocess.run(
-                    ['dbt', 'run-operation', 'get_model_data', '--vars'],
+                    ['dbt', 'run-operation', 'get_model_data'],
                     capture_output=True,
                     text=True,
                     cwd=project_dir
