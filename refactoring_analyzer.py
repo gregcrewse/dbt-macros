@@ -116,6 +116,3 @@ class DBTRefactorAnalyzer:
             'similar_models': similar_models,
             'recommendations': recommendations
         }
-            recommendations_df.to_csv(f'{output_dir}/refactoring_recommendations.csv', index=False)
-        
-        return report
