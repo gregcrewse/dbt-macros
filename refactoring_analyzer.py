@@ -156,8 +156,15 @@ class DBTRefactorAnalyzer:
                     
         return downstream
     
-    def generate_refactoring_report(self):
-        """Generate comprehensive refactoring recommendations"""
+    def generate_refactoring_report(self, output_dir='./dbt_analysis'):
+        """Generate comprehensive refactoring recommendations and save to CSV files
+        
+        Args:
+            output_dir (str): Directory to save CSV output files
+        """
+        import os
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
         report = {
             'redundant_joins': self.find_redundant_joins(),
             'similar_models': self.find_similar_transformations(),
@@ -200,6 +207,48 @@ class DBTRefactorAnalyzer:
             })
             
         report['recommendations'] = recommendations
+        
+        # Export results to CSV files
+        # Complexity metrics
+        complex_df = report['complexity_metrics']
+        complex_df.to_csv(f'{output_dir}/model_complexity_metrics.csv', index=False)
+        
+        # Redundant joins
+        if report['redundant_joins']:
+            redundant_df = pd.DataFrame(report['redundant_joins'])
+            # Convert paths list to string for CSV storage
+            redundant_df['paths'] = redundant_df['paths'].apply(lambda x: ' -> '.join(x))
+            redundant_df.to_csv(f'{output_dir}/redundant_joins.csv', index=False)
+        
+        # Similar models
+        if report['similar_models']:
+            similar_df = pd.DataFrame(report['similar_models'])
+            similar_df.to_csv(f'{output_dir}/similar_models.csv', index=False)
+        
+        # Recommendations
+        recommendations_data = []
+        for rec in recommendations:
+            if 'models' in rec:
+                for model in rec['models']:
+                    recommendations_data.append({
+                        'type': rec['type'],
+                        'model': model,
+                        'related_model': None,
+                        'suggestion': rec['suggestion']
+                    })
+            elif 'model_pairs' in rec:
+                for model1, model2 in rec['model_pairs']:
+                    recommendations_data.append({
+                        'type': rec['type'],
+                        'model': model1,
+                        'related_model': model2,
+                        'suggestion': rec['suggestion']
+                    })
+        
+        if recommendations_data:
+            recommendations_df = pd.DataFrame(recommendations_data)
+            recommendations_df.to_csv(f'{output_dir}/refactoring_recommendations.csv', index=False)
+        
         return report
 
 # Example usage:
