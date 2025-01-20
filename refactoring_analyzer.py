@@ -63,13 +63,15 @@ class DBTRefactorAnalyzer:
         for model_id, model in self.models.items():
             refs = model.get("refs", [])
             sources = model.get("sources", [])
-            unique_upstreams = set(refs + sources)
+
+            # Convert lists to tuples to ensure they are hashable
+            unique_upstreams = set(map(tuple, refs)) | set(map(tuple, sources))
 
             if len(unique_upstreams) < len(refs + sources):  # Rejoining detected
                 rejoined_models.append({
                     "model": model_id,
                     "num_rejoins": len(refs + sources) - len(unique_upstreams),
-                    "upstream_concepts": list(unique_upstreams),
+                    "upstream_concepts": [list(u) for u in unique_upstreams],  # Convert back to list for readability
                 })
 
         return rejoined_models
