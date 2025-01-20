@@ -151,7 +151,9 @@ class DBTRefactorAnalyzer:
                 continue
                 
             for ref in other.get('refs', []):
-                if ref[-1] in model_id:
+                # Extract just the model name from the full model_id
+                current_model_name = model_id.split('.')[-1]
+                if ref[-1] == current_model_name:
                     downstream.add(other_id)
                     
         return downstream
@@ -264,6 +266,9 @@ for rec in report['recommendations']:
 
 # Get detailed metrics
 metrics_df = report['complexity_metrics']
+print("\nModel Complexity Metrics:")
+print(metrics_df.sort_values('num_joins', ascending=False).head())
+"""
 print("\nModel Complexity Metrics:")
 print(metrics_df.sort_values('num_joins', ascending=False).head())
 """
