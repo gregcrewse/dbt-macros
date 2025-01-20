@@ -11,7 +11,7 @@ class DBTRefactorAnalyzer:
             self.manifest = json.load(f)
         self.models = {k: v for k, v in self.manifest.get('nodes', {}).items() 
                       if v.get('resource_type') == 'model'}
-        
+    
     def get_model_parents(self, model_id):
         """Get immediate parent models of a given model"""
         model = self.models.get(model_id)
@@ -32,6 +32,39 @@ class DBTRefactorAnalyzer:
             if model_id in deps:
                 children.add(other_id)
         return children
+
+    def find_rejoined_concepts(self):
+        """Find cases where a model rejoins to upstream concepts unnecessarily"""
+        rejoined_patterns = []
+        
+        for model_id in self.models:
+            # Get immediate parents of this model
+            parents = self.get_model_parents(model_id)
+            
+            # For each parent, check its other children
+            for parent in parents:
+                parent_children = self.get_model_children(parent)
+                
+                # Look for siblings that this model depends on
+                model_parents = self.get_model_parents(model_id)
+                sibling_dependencies = parent_children.intersection(model_parents)
+                
+                for sibling in sibling_dependencies:
+                    # Check if sibling only has this model as a child
+                    sibling_children = self.get_model_children(sibling)
+                    if len(sibling_children) == 1 and model_id in sibling_children:
+                        rejoined_patterns.append({
+                            'model': model_id,
+                            'parent': parent,
+                            'intermediate_model': sibling,
+                            'suggestion': (
+                                f"Model '{model_id}' rejoins to '{parent}' through '{sibling}'. "
+                                f"Consider moving the logic from '{sibling}' into a CTE within '{model_id}' "
+                                "since it has no other downstream dependencies."
+                            )
+                        })
+        
+        return rejoined_patterns
 
     def find_combinable_intermediates(self):
         """Find intermediate models that could potentially be combined"""
@@ -163,12 +196,39 @@ class DBTRefactorAnalyzer:
                 processed.add(model_id1)
         
         return sorted(similar_pairs, key=lambda x: x['total_similarity'], reverse=True)
+
+    def get_model_complexity_metrics(self):
+        """Calculate complexity metrics for each model"""
+        metrics = []
+        
+        for model_id, model in self.models.items():
+            sql = model.get('raw_sql', '')
+            metrics.append({
+                'model': model_id,
+                'num_joins': sql.lower().count('join'),
+                'num_ctes': sql.lower().count('with'),
+                'num_refs': len(model.get('refs', [])),
+                'num_sources': len(model.get('sources', [])),
+                'num_children': len(self.get_model_children(model_id)),
+                'num_parents': len(self.get_model_parents(model_id)),
+                'sql_length': len(sql)
+            })
+        
+        return pd.DataFrame(metrics)
     
     def generate_refactoring_report(self, output_dir='./dbt_analysis'):
         """Generate comprehensive refactoring recommendations"""
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
         
+        # Find rejoined concepts
+        rejoined = self.find_rejoined_concepts()
+        if rejoined:
+            pd.DataFrame(rejoined).to_csv(
+                f'{output_dir}/rejoined_concepts.csv', 
+                index=False
+            )
+
         # Find combinable intermediate models
         combinable = self.find_combinable_intermediates()
         if combinable:
@@ -184,10 +244,23 @@ class DBTRefactorAnalyzer:
                 f'{output_dir}/similar_models.csv', 
                 index=False
             )
+
+        # Get complexity metrics
+        metrics = self.get_model_complexity_metrics()
+        metrics.to_csv(f'{output_dir}/model_complexity_metrics.csv', index=False)
         
         # Generate recommendations
         recommendations = []
         
+        # Add recommendations for rejoined concepts
+        for item in rejoined:
+            recommendations.append({
+                'model': item['model'],
+                'type': 'rejoined_concept',
+                'related_models': f"{item['parent']} -> {item['intermediate_model']}",
+                'suggestion': item['suggestion']
+            })
+
         # Add recommendations for combinable intermediates
         for item in combinable:
             recommendations.append({
@@ -210,6 +283,25 @@ class DBTRefactorAnalyzer:
                     f"Ref similarity: {item['ref_similarity']:.0%}"
                 )
             })
+
+        # Add recommendations for complex models
+        complex_models = metrics[
+            (metrics['num_joins'] > 5) | 
+            (metrics['num_refs'] > 5) |
+            (metrics['sql_length'] > 1000)
+        ]
+        
+        for _, row in complex_models.iterrows():
+            recommendations.append({
+                'model': row['model'],
+                'type': 'complexity',
+                'related_models': '',
+                'suggestion': (
+                    f"Complex model with {row['num_joins']} joins, "
+                    f"{row['num_refs']} refs, and {row['sql_length']} chars. "
+                    "Consider breaking into smaller models."
+                )
+            })
         
         if recommendations:
             pd.DataFrame(recommendations).to_csv(
@@ -219,11 +311,15 @@ class DBTRefactorAnalyzer:
         
         print(f"\nAnalysis complete! Files saved to: {output_dir}")
         print(f"Found:")
+        print(f"- {len(rejoined)} cases of rejoined concepts")
         print(f"- {len(combinable)} combinable intermediate models")
         print(f"- {len(similar)} similar model pairs")
+        print(f"- {len(complex_models)} complex models")
         
         return {
+            'rejoined_concepts': rejoined,
             'combinable_intermediates': combinable,
             'similar_models': similar,
+            'complexity_metrics': metrics,
             'recommendations': recommendations
         }
