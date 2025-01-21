@@ -368,10 +368,21 @@ class DBTRefactorAnalyzer:
         refactored_models = []
         
         if redundant:
+            print("\nDEBUG: Found redundant refs:")
+            for ref in redundant:
+                print(f"\nModel: {ref['model']}")
+                model = self.models.get(ref['model'])
+                print(f"Model name exists: {model is not None}")
+                if model:
+                    print(f"Model raw SQL exists: {'raw_sql' in model}")
+                    print(f"Model name field exists: {'name' in model}")
+                
             # Generate refactored SQL for each redundant ref
             for ref in redundant:
+                print(f"\nAttempting to refactor: {ref['model']}")
                 refactored = self.generate_refactored_sql(ref)
                 if refactored:
+                    print(f"Successfully refactored!")
                     refactored_models.append(refactored)
                     
                     # Save the refactored SQL to a file
@@ -385,6 +396,8 @@ class DBTRefactorAnalyzer:
                     # Add detailed changes to the recommendation
                     ref['sql_changes'] = refactored['changes_made']
                     ref['refactored_file'] = f"refactored_models/{refactored['model_name']}.sql"
+                else:
+                    print(f"Failed to refactor - could not generate SQL")
             
             # Save redundant refs with SQL change details
             pd.DataFrame(redundant).to_csv(
