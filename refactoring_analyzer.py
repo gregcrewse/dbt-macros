@@ -11,6 +11,13 @@ class DBTRefactorAnalyzer:
             self.manifest = json.load(f)
         self.models = {k: v for k, v in self.manifest.get('nodes', {}).items() 
                       if v.get('resource_type') == 'model'}
+
+    def get_model_refs(self, model_id):
+        """Get all models referenced by this model"""
+        model = self.models.get(model_id)
+        if not model:
+            return set()
+        return set(model.get('depends_on', {}).get('nodes', []))
     
     def get_model_parents(self, model_id):
         """Get immediate parent models of a given model"""
@@ -32,6 +39,41 @@ class DBTRefactorAnalyzer:
             if model_id in deps:
                 children.add(other_id)
         return children
+
+    def find_redundant_refs(self):
+        """Find models that reference both a parent and that parent's parent"""
+        redundant_refs = []
+        
+        for model_id, model in self.models.items():
+            # Get all models this model references directly
+            direct_refs = self.get_model_refs(model_id)
+            
+            # For each referenced model (parent)
+            for parent_ref in direct_refs:
+                if parent_ref not in self.models:
+                    continue
+                    
+                # Get what the parent references (grandparents)
+                parent_refs = self.get_model_refs(parent_ref)
+                
+                # Check if we reference any of our parent's refs (grandparents)
+                redundant = direct_refs.intersection(parent_refs)
+                
+                if redundant:
+                    for grandparent in redundant:
+                        redundant_refs.append({
+                            'model': model_id,
+                            'parent': parent_ref,
+                            'grandparent': grandparent,
+                            'suggestion': (
+                                f"Model '{model_id}' references both '{parent_ref}' and '{grandparent}', "
+                                f"but '{parent_ref}' already includes '{grandparent}'. "
+                                f"Consider removing the reference to '{grandparent}' and getting those "
+                                f"columns through '{parent_ref}' instead."
+                            )
+                        })
+        
+        return redundant_refs
 
     def find_rejoined_concepts(self):
         """Find cases where a model rejoins to upstream concepts unnecessarily"""
@@ -220,6 +262,14 @@ class DBTRefactorAnalyzer:
         """Generate comprehensive refactoring recommendations"""
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
+
+        # Find redundant refs
+        redundant = self.find_redundant_refs()
+        if redundant:
+            pd.DataFrame(redundant).to_csv(
+                f'{output_dir}/redundant_refs.csv', 
+                index=False
+            )
         
         # Find rejoined concepts
         rejoined = self.find_rejoined_concepts()
@@ -251,6 +301,15 @@ class DBTRefactorAnalyzer:
         
         # Generate recommendations
         recommendations = []
+
+        # Add recommendations for redundant refs
+        for item in redundant:
+            recommendations.append({
+                'model': item['model'],
+                'type': 'redundant_ref',
+                'related_models': f"{item['parent']} -> {item['grandparent']}",
+                'suggestion': item['suggestion']
+            })
         
         # Add recommendations for rejoined concepts
         for item in rejoined:
@@ -311,12 +370,14 @@ class DBTRefactorAnalyzer:
         
         print(f"\nAnalysis complete! Files saved to: {output_dir}")
         print(f"Found:")
+        print(f"- {len(redundant)} cases of redundant refs")
         print(f"- {len(rejoined)} cases of rejoined concepts")
         print(f"- {len(combinable)} combinable intermediate models")
         print(f"- {len(similar)} similar model pairs")
         print(f"- {len(complex_models)} complex models")
         
         return {
+            'redundant_refs': redundant,
             'rejoined_concepts': rejoined,
             'combinable_intermediates': combinable,
             'similar_models': similar,
