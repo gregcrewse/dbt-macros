@@ -259,104 +259,128 @@ class DBTRefactorAnalyzer:
         return pd.DataFrame(metrics)
 
     def generate_refactored_sql(self, redundant_ref):
-        """Generate refactored SQL code for a model with redundant refs"""
-        model = self.models.get(redundant_ref['model'])
-        parent = self.models.get(redundant_ref['parent'])
-        grandparent = self.models.get(redundant_ref['grandparent'])
-        
-        if not all([model, parent, grandparent]):
-            return None
-        
-        # Get original SQL
-        original_sql = model.get('raw_sql', '')
-        
-        # Analyze how the grandparent is referenced
-        gp_model_name = grandparent['name']
-        p_model_name = parent['name']
-        
-        # Find ref patterns for grandparent
-        ref_patterns = [
-            f"ref('{gp_model_name}')",
-            f'ref("{gp_model_name}")',
-            f"ref('{gp_model_name}') as",
-            f'ref("{gp_model_name}") as'
-        ]
-        
-        # Find the full ref line(s) that reference the grandparent
-        sql_lines = original_sql.split('\n')
-        gp_ref_lines = []
-        ref_aliases = []
-        
-        for i, line in enumerate(sql_lines):
-            line_lower = line.lower()
-            if any(pattern.lower() in line_lower for pattern in ref_patterns):
-                gp_ref_lines.append((i, line))
-                # Try to extract alias
-                if ' as ' in line_lower:
-                    alias = line_lower.split(' as ')[-1].strip()
-                    ref_aliases.append(alias)
-        
-        # If we found the references, create refactored SQL
-        if gp_ref_lines:
-            refactored_sql = []
-            changes_made = []
+            """Generate refactored SQL code for a model with redundant refs"""
+            model = self.models.get(redundant_ref['model'])
+            parent = self.models.get(redundant_ref['parent'])
+            grandparent = self.models.get(redundant_ref['grandparent'])
             
-            # Start with any config blocks
-            in_config = False
-            for line in sql_lines:
-                if '{{' in line and 'config' in line:
-                    in_config = True
-                    refactored_sql.append(line)
-                    continue
-                if in_config:
-                    refactored_sql.append(line)
-                    if '}}' in line:
-                        in_config = False
-                    continue
-                break
+            if not all([model, parent, grandparent]):
+                return None
             
-            # Add comment explaining the change
-            refactored_sql.extend([
-                f"-- Refactored to remove redundant reference to {gp_model_name}",
-                f"-- These columns are now accessed through {p_model_name}",
-                ""
-            ])
+            # Get original SQL - check different possible locations in the manifest
+            original_sql = None
+            if 'raw_code' in model:  # Try raw_code first
+                original_sql = model['raw_code']
+            elif 'raw_sql' in model:  # Try raw_sql next
+                original_sql = model['raw_sql']
+            elif 'compiled_code' in model:  # Try compiled_code as fallback
+                original_sql = model['compiled_code']
             
-            # Process the rest of the SQL
+            if not original_sql:
+                print(f"DEBUG: Available keys in model: {list(model.keys())}")
+                return None
+            
+            # Analyze how the grandparent is referenced
+            gp_name = grandparent.get('name', grandparent['unique_id'].split('.')[-1])
+            p_name = parent.get('name', parent['unique_id'].split('.')[-1])
+            
+            # Find ref patterns for grandparent (expanded to catch more variations)
+            ref_patterns = [
+                f"ref('{gp_name}')",
+                f'ref("{gp_name}")',
+                f"ref('{gp_name}') as",
+                f'ref("{gp_name}") as',
+                f"ref('{gp_name}') ",
+                f'ref("{gp_name}") ',
+                f"ref('{gp_name}')]",
+                f'ref("{gp_name}")]'
+            ]
+            
+            # Find the full ref line(s) that reference the grandparent
+            sql_lines = original_sql.split('\n')
+            gp_ref_lines = []
+            ref_aliases = []
+            
             for i, line in enumerate(sql_lines):
-                # Skip config blocks we already processed
-                if in_config:
-                    if '}}' in line:
-                        in_config = False
-                    continue
-                    
-                # Skip the lines that reference the grandparent
-                if any(i == idx for idx, _ in gp_ref_lines):
-                    changes_made.append(f"Removed reference: {line.strip()}")
-                    continue
-                
-                # Replace any references to the grandparent alias in joins
-                line_modified = line
-                for alias in ref_aliases:
-                    if alias in line:
-                        # Check if this is a join condition
-                        if 'join' in line.lower() and 'on' in line.lower():
-                            # Replace the grandparent alias with the appropriate parent column
-                            line_modified = line.replace(alias, p_model_name)
-                            changes_made.append(f"Modified join: {line.strip()} -> {line_modified.strip()}")
-                
-                refactored_sql.append(line_modified)
+                line_lower = line.lower()
+                if any(pattern.lower() in line_lower for pattern in ref_patterns):
+                    gp_ref_lines.append((i, line))
+                    # Try to extract alias - look for both 'as' and into CTE patterns
+                    if ' as ' in line_lower:
+                        alias = line_lower.split(' as ')[-1].strip().strip(',')
+                        ref_aliases.append(alias)
+                    elif 'with ' in line_lower or ',' in line_lower:
+                        parts = line.split('ref')
+                        if len(parts) > 1:
+                            alias_part = parts[0].strip()
+                            if alias_part:
+                                ref_aliases.append(alias_part.strip())
             
-            return {
-                'original_sql': original_sql,
-                'refactored_sql': '\n'.join(refactored_sql),
-                'changes_made': changes_made,
-                'model_name': model['name'],
-                'removed_ref': gp_model_name,
-                'use_parent': p_model_name
-            }
-        
-        return None
+            # If we found the references, create refactored SQL
+            if gp_ref_lines:
+                refactored_sql = []
+                changes_made = []
+                
+                # Start with any config blocks
+                in_config = False
+                for line in sql_lines:
+                    if '{{' in line and 'config' in line:
+                        in_config = True
+                        refactored_sql.append(line)
+                        continue
+                    if in_config:
+                        refactored_sql.append(line)
+                        if '}}' in line:
+                            in_config = False
+                        continue
+                    break
+                
+                # Add comment explaining the change
+                refactored_sql.extend([
+                    f"-- Refactored to remove redundant reference to {gp_name}",
+                    f"-- These columns are now accessed through {p_name}",
+                    ""
+                ])
+                
+                # Process the rest of the SQL
+                for i, line in enumerate(sql_lines):
+                    # Skip config blocks we already processed
+                    if in_config:
+                        if '}}' in line:
+                            in_config = False
+                        continue
+                        
+                    # Skip the lines that reference the grandparent
+                    if any(i == idx for idx, _ in gp_ref_lines):
+                        changes_made.append(f"Removed reference: {line.strip()}")
+                        continue
+                    
+                    # Replace any references to the grandparent alias in joins
+                    line_modified = line
+                    for alias in ref_aliases:
+                        if alias and alias in line:
+                            # Check if this is a join condition
+                            if 'join' in line.lower() and 'on' in line.lower():
+                                # Replace the grandparent alias with the appropriate parent column
+                                line_modified = line.replace(alias, p_name)
+                                changes_made.append(f"Modified join: {line.strip()} -> {line_modified.strip()}")
+                            # Also check for column references
+                            elif alias + '.' in line:
+                                line_modified = line.replace(alias + '.', p_name + '.')
+                                changes_made.append(f"Modified column reference: {line.strip()} -> {line_modified.strip()}")
+                    
+                    refactored_sql.append(line_modified)
+                
+                return {
+                    'original_sql': original_sql,
+                    'refactored_sql': '\n'.join(refactored_sql),
+                    'changes_made': changes_made,
+                    'model_name': model.get('name', model['unique_id'].split('.')[-1]),
+                    'removed_ref': gp_name,
+                    'use_parent': p_name
+                }
+            
+            return None
     
     def generate_refactoring_report(self, output_dir='./dbt_analysis'):
         """Generate comprehensive refactoring recommendations"""
