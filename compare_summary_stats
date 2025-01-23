@@ -53,99 +53,68 @@
     {{ return(stats) }}
 {% endmacro %}
 
-{# Main comparison macro #}
-{% macro compare_schema_models(
-    model_name,
-    dev_schema='NULL',
-    uat_schema='NULL',
-    output_schema='NULL',
-    output_table='model_comparison_results'
-) %}
-    {% set results = {} %}
+-- macros/model_comparison_macros.sql
+{# Same helper macros as before #}
+{% macro get_downstream_models(model_name) %}
+    -- ... (keep this macro the same)
+{% endmacro %}
+
+{% macro collect_model_stats(schema_name, model_name) %}
+    -- ... (keep this macro the same)
+{% endmacro %}
+
+{% macro compare_schema_models(model_name) %}
+    {{ return(run_query(get_comparison_query(model_name))) }}
+{% endmacro %}
+
+{% macro get_comparison_query(model_name) %}
+    {% set dev_schema = 'NULL' %}
+    {% set uat_schema = 'NULL' %}
     
-    {% if execute %}
-        {# Get downstream models #}
-        {% set downstream_models = get_downstream_models(model_name) %}
-        
-        {# Initialize results #}
-        {% set results = {
-            'uat': {'stats': {}},
-            'dev': {'stats': {}}
-        } %}
-        
-        {# Create output table if it doesn't exist #}
-        {% set create_table_query %}
-            CREATE TABLE IF NOT EXISTS {{ output_schema }}.{{ output_table }} (
-                comparison_timestamp TIMESTAMP,
-                model_name VARCHAR(255),
-                metric_name VARCHAR(255),
-                uat_value VARCHAR(255),
-                dev_value VARCHAR(255),
-                difference NUMERIC(38,2),
-                percent_change NUMERIC(38,2)
-            );
-        {% endset %}
-        {% do run_query(create_table_query) %}
-        
-        {# Collect dev stats #}
-        {% do results.dev.stats.update({model_name: collect_model_stats(dev_schema, model_name)}) %}
-        {% for downstream in downstream_models %}
-            {% do results.dev.stats.update({downstream: collect_model_stats(dev_schema, downstream)}) %}
-        {% endfor %}
-        
-        {# Collect UAT stats #}
-        {% do results.uat.stats.update({model_name: collect_model_stats(uat_schema, model_name)}) %}
-        {% for downstream in downstream_models %}
-            {% do results.uat.stats.update({downstream: collect_model_stats(uat_schema, downstream)}) %}
-        {% endfor %}
-        
-        {# Clear existing results for these models #}
-        {% set clear_results_query %}
-            DELETE FROM {{ output_schema }}.{{ output_table }}
-            WHERE model_name IN (
-                '{{ model_name }}'
-                {% for downstream in downstream_models %}
-                    ,'{{ downstream }}'
-                {% endfor %}
-            );
-        {% endset %}
-        {% do run_query(clear_results_query) %}
-        
-        {# Insert comparison results #}
-        {% for model, uat_stats in results.uat.stats.items() %}
-            {% set dev_stats = results.dev.stats[model] %}
-            {% for metric, uat_value in uat_stats.items() %}
-                {% set dev_value = dev_stats[metric] %}
-                {% set difference = none %}
-                {% set percent_change = none %}
-                
-                {% if uat_value is number and dev_value is number %}
-                    {% set difference = dev_value - uat_value %}
-                    {% if uat_value != 0 %}
-                        {% set percent_change = ((dev_value - uat_value) / uat_value * 100) %}
-                    {% endif %}
-                {% endif %}
-                
-                {% set insert_query %}
-                    INSERT INTO {{ output_schema }}.{{ output_table }}
-                    VALUES (
-                        GETDATE(),
-                        '{{ model }}',
-                        '{{ metric }}',
-                        '{{ uat_value }}',
-                        '{{ dev_value }}',
-                        {{ difference if difference is not none else 'NULL' }},
-                        {{ percent_change if percent_change is not none else 'NULL' }}
-                    );
-                {% endset %}
-                {% do run_query(insert_query) %}
+    WITH dev_stats AS (
+        SELECT 
+            COUNT(*) as row_count,
+            {% for column in adapter.get_columns_in_relation(ref(model_name)) %}
+                COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
+                {% if not loop.last %},{% endif %}
             {% endfor %}
-        {% endfor %}
-        
-        {# Return the comparison table location #}
-        {{ return({
-            'comparison_table': output_schema ~ '.' ~ output_table,
-            'compared_models': [model_name] + downstream_models
-        }) }}
-    {% endif %}
+        FROM {{ ref(model_name) }}
+    ),
+    uat_stats AS (
+        SELECT 
+            COUNT(*) as row_count,
+            {% for column in adapter.get_columns_in_relation(ref(model_name)) %}
+                COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
+                {% if not loop.last %},{% endif %}
+            {% endfor %}
+        FROM {{ uat_schema }}.{{ model_name }}
+    )
+    SELECT 
+        '{{ model_name }}' as model_name,
+        GETDATE() as comparison_timestamp,
+        'row_count' as metric_name,
+        dev_stats.row_count as dev_value,
+        uat_stats.row_count as uat_value,
+        dev_stats.row_count - uat_stats.row_count as difference,
+        CASE 
+            WHEN uat_stats.row_count = 0 THEN NULL
+            ELSE ((dev_stats.row_count::FLOAT - uat_stats.row_count) / uat_stats.row_count * 100)
+        END as percent_change
+    FROM dev_stats, uat_stats
+    {% for column in adapter.get_columns_in_relation(ref(model_name)) %}
+    UNION ALL
+    SELECT 
+        '{{ model_name }}' as model_name,
+        GETDATE() as comparison_timestamp,
+        'distinct_{{ column.name }}_count' as metric_name,
+        dev_stats.distinct_{{ column.name }}_count as dev_value,
+        uat_stats.distinct_{{ column.name }}_count as uat_value,
+        dev_stats.distinct_{{ column.name }}_count - uat_stats.distinct_{{ column.name }}_count as difference,
+        CASE 
+            WHEN uat_stats.distinct_{{ column.name }}_count = 0 THEN NULL
+            ELSE ((dev_stats.distinct_{{ column.name }}_count::FLOAT - uat_stats.distinct_{{ column.name }}_count) 
+                  / uat_stats.distinct_{{ column.name }}_count * 100)
+        END as percent_change
+    FROM dev_stats, uat_stats
+    {% endfor %}
 {% endmacro %}
