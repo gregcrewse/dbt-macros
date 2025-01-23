@@ -1,156 +1,128 @@
+{# Helper macro to get downstream models #}
+{% macro get_downstream_models(model_name) %}
+    {% set downstream_models = [] %}
+    {% if execute %}
+        {% set model_node = graph.nodes['model.' ~ project_name ~ '.' ~ model_name] %}
+        {% for node in graph.nodes.values() %}
+            {% if node.resource_type == 'model' and node.depends_on and model_node.unique_id in node.depends_on.nodes %}
+                {% do downstream_models.append(node.name) %}
+            {% endif %}
+        {% endfor %}
+    {% endif %}
+    {{ return(downstream_models) }}
+{% endmacro %}
+
 {# Helper macro to collect statistics for a model #}
-{% macro collect_model_stats(model_name) %}
+{% macro collect_model_stats(model_relation) %}
     {% set stats = {} %}
     
-    {# Get model relation #}
-    {% set model_relation = ref(model_name) %}
-    {% set columns = adapter.get_columns_in_relation(model_relation) %}
-    
-    {# Basic statistics query template #}
-    {% set stats_query %}
-        WITH base_stats AS (
+    {% if execute %}
+        {% set columns = adapter.get_columns_in_relation(model_relation) %}
+        
+        {% set stats_query %}
             SELECT 
                 COUNT(*) as row_count
                 {% for column in columns %}
-                    {% if column.is_string() or column.is_numeric() or column.is_timestamp() %}
+                    {% if column.is_number() or column.is_string() or column.is_datetime() %}
                         ,COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
-                        {% if column.is_numeric() %}
+                        {% if column.is_number() %}
+                            ,AVG({{ column.name }})::NUMERIC(38,2) as avg_{{ column.name }}
                             ,MIN({{ column.name }}) as min_{{ column.name }}
                             ,MAX({{ column.name }}) as max_{{ column.name }}
-                            ,AVG({{ column.name }})::NUMERIC(38,2) as avg_{{ column.name }}
                         {% endif %}
                     {% endif %}
                 {% endfor %}
             FROM {{ model_relation }}
-        )
-        SELECT 
-            *
-            {% for column in columns %}
-                {% if column.is_string() %}
-                    ,(
-                        SELECT STRING_AGG(DISTINCT {{ column.name }}::text, ',' ORDER BY {{ column.name }}::text)
-                        FROM (
-                            SELECT {{ column.name }}
-                            FROM {{ model_relation }}
-                            WHERE {{ column.name }} IS NOT NULL
-                            GROUP BY {{ column.name }}
-                            ORDER BY {{ column.name }}
-                            LIMIT 10
-                        ) t
-                    ) as sample_values_{{ column.name }}
-                {% endif %}
-            {% endfor %}
-        FROM base_stats
-    {% endset %}
-    
-    {% set results = run_query(stats_query) %}
-    {% do stats.update(results.rows[0]) %}
+        {% endset %}
+        
+        {% set results = run_query(stats_query) %}
+        {% if results %}
+            {% do stats.update(results.rows[0]) %}
+        {% endif %}
+    {% endif %}
     
     {{ return(stats) }}
 {% endmacro %}
 
-{# Function to collect all model statistics for a branch #}
-{% macro collect_branch_stats(branch_name, model_name, downstream_model_names) %}
-    {% set branch_stats = {} %}
-    
-    {# Checkout branch #}
-    {% do run_query('git checkout ' ~ branch_name) %}
-    
-    {# Run the model and its downstream dependencies #}
-    {% do run_query('dbt run --models ' ~ model_name ~ ' +' ~ model_name) %}
-    
-    {# Collect stats for main model #}
-    {% do branch_stats.update({model_name: collect_model_stats(model_name)}) %}
-    
-    {# Collect stats for downstream models #}
-    {% for downstream_name in downstream_model_names %}
-        {% do branch_stats.update({downstream_name: collect_model_stats(downstream_name)}) %}
-    {% endfor %}
-    
-    {{ return(branch_stats) }}
-{% endmacro %}
-
 {# Main comparison macro #}
 {% macro compare_model_execution_results(model_name, target_branch='main', output_path=none) %}
-    {# Store current branch name #}
-    {% set current_branch = run_query('git rev-parse --abbrev-ref HEAD').columns[0][0] %}
-
-    {# Set default output path if not provided #}
     {% if not output_path %}
         {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
-        {% set output_path = '/tmp/execution_comparison_' ~ model_name ~ '_' ~ current_branch ~ '_vs_' ~ target_branch ~ '_' ~ timestamp ~ '.csv' %}
+        {% set output_path = '/tmp/execution_comparison_' ~ model_name ~ '_' ~ timestamp ~ '.csv' %}
     {% endif %}
 
-    {# Get downstream models using manifest #}
-    {% set downstream_model_names = [] %}
-    {% for node_name, node in graph.nodes.items() %}
-        {% if node.resource_type == 'model' and node.depends_on.nodes is defined %}
-            {% set unique_id = 'model.' ~ project_name ~ '.' ~ model_name %}
-            {% if unique_id in node.depends_on.nodes %}
-                {% do downstream_model_names.append(node.name) %}
-            {% endif %}
-        {% endif %}
-    {% endfor %}
-
-    {# Initialize results storage #}
-    {% set results = {
-        'current_branch': {'name': current_branch, 'stats': {}},
-        'target_branch': {'name': target_branch, 'stats': {}}
-    } %}
-
-    {# Collect statistics for both branches #}
-    {% do results.target_branch.stats.update(collect_branch_stats(target_branch, model_name, downstream_model_names)) %}
-    {% do results.current_branch.stats.update(collect_branch_stats(current_branch, model_name, downstream_model_names)) %}
-
-    {# Return to original branch #}
-    {% do run_query('git checkout ' ~ current_branch) %}
-
-    {# Prepare CSV output #}
-    {% set csv_rows = [] %}
-    {% set csv_header = ['timestamp', 'metric_type', 'model_name', 'column_name', 'metric_name', 
-                        target_branch ~ '_value', current_branch ~ '_value', 'difference', 'percent_change'] %}
-
-    {# Add rows for each metric #}
-    {% for branch_model, stats in results.target_branch.stats.items() %}
-        {% set current_stats = results.current_branch.stats[branch_model] %}
+    {% set results = {} %}
+    
+    {% if execute %}
+        {# Get the current branch #}
+        {% set current_branch = run_query('git rev-parse --abbrev-ref HEAD').columns[0][0] %}
         
-        {% for metric, value in stats.items() %}
-            {% set current_value = current_stats[metric] %}
-            {% set metric_parts = metric.split('_') %}
-            {% set metric_type = metric_parts[0] %}
-            {% set column_name = metric_parts[1:] | join('_') if metric_parts[1:] else 'N/A' %}
-            
-            {% set difference = none %}
-            {% set percent_change = none %}
-            
-            {% if value is number and current_value is number %}
-                {% set difference = current_value - value %}
-                {% if value != 0 %}
-                    {% set percent_change = ((current_value - value) / value * 100) | round(2) %}
-                {% endif %}
-            {% endif %}
-            
-            {% do csv_rows.append([
-                modules.datetime.datetime.now(),
-                metric_type,
-                branch_model,
-                column_name,
-                metric,
-                value,
-                current_value,
-                difference,
-                percent_change
-            ]) %}
+        {# Get downstream models #}
+        {% set downstream_models = get_downstream_models(model_name) %}
+        
+        {# Initialize results #}
+        {% set results = {
+            'target': {'branch': target_branch, 'stats': {}},
+            'current': {'branch': current_branch, 'stats': {}}
+        } %}
+        
+        {# Analyze target branch #}
+        {% do run_query('git checkout ' ~ target_branch) %}
+        {% do run_query('dbt run --models ' ~ model_name ~ ' ' ~ downstream_models | join(' ')) %}
+        
+        {# Collect target branch stats #}
+        {% do results.target.stats.update({model_name: collect_model_stats(ref(model_name))}) %}
+        {% for downstream in downstream_models %}
+            {% do results.target.stats.update({downstream: collect_model_stats(ref(downstream))}) %}
         {% endfor %}
-    {% endfor %}
-
-    {# Write to CSV file #}
-    {% do modules.csv.writer(open(output_path, 'w')).writerows([csv_header] + csv_rows) %}
-
-    {# Return results dictionary #}
-    {{ return({
-        'results': results,
-        'csv_output_path': output_path,
-        'analyzed_models': [model_name] + downstream_model_names
-    }) }}
+        
+        {# Analyze current branch #}
+        {% do run_query('git checkout ' ~ current_branch) %}
+        {% do run_query('dbt run --models ' ~ model_name ~ ' ' ~ downstream_models | join(' ')) %}
+        
+        {# Collect current branch stats #}
+        {% do results.current.stats.update({model_name: collect_model_stats(ref(model_name))}) %}
+        {% for downstream in downstream_models %}
+            {% do results.current.stats.update({downstream: collect_model_stats(ref(downstream))}) %}
+        {% endfor %}
+        
+        {# Create CSV output #}
+        {% set csv_rows = [] %}
+        {% set csv_header = ['timestamp', 'model', 'metric', target_branch ~ '_value', 
+                           current_branch ~ '_value', 'difference', 'percent_change'] %}
+        
+        {% for model, target_stats in results.target.stats.items() %}
+            {% set current_stats = results.current.stats[model] %}
+            {% for metric, target_value in target_stats.items() %}
+                {% set current_value = current_stats[metric] %}
+                {% set difference = none %}
+                {% set percent_change = none %}
+                
+                {% if target_value is number and current_value is number %}
+                    {% set difference = current_value - target_value %}
+                    {% if target_value != 0 %}
+                        {% set percent_change = ((current_value - target_value) / target_value * 100) | round(2) %}
+                    {% endif %}
+                {% endif %}
+                
+                {% do csv_rows.append([
+                    modules.datetime.datetime.now(),
+                    model,
+                    metric,
+                    target_value,
+                    current_value,
+                    difference,
+                    percent_change
+                ]) %}
+            {% endfor %}
+        {% endfor %}
+        
+        {# Write CSV file #}
+        {% do modules.csv.writer(open(output_path, 'w')).writerows([csv_header] + csv_rows) %}
+        
+        {# Return to original branch #}
+        {% do run_query('git checkout ' ~ current_branch) %}
+    {% endif %}
+    
+    {{ return({'results': results, 'csv_path': output_path}) }}
 {% endmacro %}
