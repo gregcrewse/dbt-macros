@@ -12,99 +12,126 @@
     {{ return(downstream_models) }}
 {% endmacro %}
 
-{# Helper macro to collect statistics for a model #}
-{% macro collect_model_stats(schema_name, model_name) %}
-    {% set stats = {} %}
-    
-    {% if execute %}
-        {# Get relation from specific schema #}
-        {% set relation = adapter.get_relation(
-            database=target.database,
-            schema=schema_name,
-            identifier=model_name
-        ) %}
-        
-        {% if relation %}
-            {% set columns = adapter.get_columns_in_relation(relation) %}
-            
-            {% set stats_query %}
-                SELECT 
-                    COUNT(*) as row_count
-                    {% for column in columns %}
-                        {% if column.is_number() or column.is_string() or column.is_datetime() %}
-                            ,COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
-                            {% if column.is_number() %}
-                                ,AVG({{ column.name }})::NUMERIC(38,2) as avg_{{ column.name }}
-                                ,MIN({{ column.name }}) as min_{{ column.name }}
-                                ,MAX({{ column.name }}) as max_{{ column.name }}
-                            {% endif %}
-                        {% endif %}
-                    {% endfor %}
-                FROM {{ relation }}
-            {% endset %}
-            
-            {% set results = run_query(stats_query) %}
-            {% if results %}
-                {% do stats.update(results.rows[0]) %}
-            {% endif %}
+{# Helper macro to generate column stats #}
+{% macro get_column_stats_sql(columns) %}
+    COUNT(*) as row_count
+    {% for column in columns %}
+        ,COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
+        {% if column.is_number() %}
+            ,MIN({{ column.name }}) as min_{{ column.name }}
+            ,MAX({{ column.name }}) as max_{{ column.name }}
+            ,AVG({{ column.name }})::NUMERIC(38,2) as avg_{{ column.name }}
         {% endif %}
-    {% endif %}
-    
-    {{ return(stats) }}
+    {% endfor %}
 {% endmacro %}
 
+{# Main comparison macro #}
 {% macro compare_schema_models(model_name) %}
-    {{ return(run_query(get_comparison_query(model_name))) }}
-{% endmacro %}
-
-{% macro get_comparison_query(model_name) %}
     {% set dev_schema = 'NULL' %}
     {% set uat_schema = 'NULL' %}
     
+    {% set model_relation = ref(model_name) %}
+    {% set columns = adapter.get_columns_in_relation(model_relation) %}
+    
     WITH dev_stats AS (
         SELECT 
-            COUNT(*) as row_count,
-            {% for column in adapter.get_columns_in_relation(ref(model_name)) %}
-                COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
-                {% if not loop.last %},{% endif %}
-            {% endfor %}
-        FROM {{ ref(model_name) }}
+            {{ get_column_stats_sql(columns) }}
+        FROM {{ model_relation }}
     ),
     uat_stats AS (
         SELECT 
-            COUNT(*) as row_count,
-            {% for column in adapter.get_columns_in_relation(ref(model_name)) %}
-                COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
-                {% if not loop.last %},{% endif %}
-            {% endfor %}
+            {{ get_column_stats_sql(columns) }}
         FROM {{ uat_schema }}.{{ model_name }}
+    ),
+    metrics AS (
+        SELECT 
+            '{{ model_name }}' as model_name,
+            GETDATE() as comparison_timestamp,
+            'row_count' as metric_name,
+            dev_stats.row_count::VARCHAR as dev_value,
+            uat_stats.row_count::VARCHAR as uat_value,
+            (dev_stats.row_count - uat_stats.row_count)::NUMERIC(38,2) as difference,
+            CASE 
+                WHEN uat_stats.row_count = 0 THEN NULL
+                ELSE ((dev_stats.row_count::FLOAT - uat_stats.row_count) / uat_stats.row_count * 100)::NUMERIC(38,2)
+            END as percent_change
+        FROM dev_stats, uat_stats
+
+        {% for column in columns %}
+            UNION ALL
+            SELECT 
+                '{{ model_name }}' as model_name,
+                GETDATE() as comparison_timestamp,
+                'distinct_{{ column.name }}_count' as metric_name,
+                dev_stats.distinct_{{ column.name }}_count::VARCHAR as dev_value,
+                uat_stats.distinct_{{ column.name }}_count::VARCHAR as uat_value,
+                (dev_stats.distinct_{{ column.name }}_count - uat_stats.distinct_{{ column.name }}_count)::NUMERIC(38,2) as difference,
+                CASE 
+                    WHEN uat_stats.distinct_{{ column.name }}_count = 0 THEN NULL
+                    ELSE ((dev_stats.distinct_{{ column.name }}_count::FLOAT - uat_stats.distinct_{{ column.name }}_count) 
+                          / uat_stats.distinct_{{ column.name }}_count * 100)::NUMERIC(38,2)
+                END as percent_change
+            FROM dev_stats, uat_stats
+
+            {% if column.is_number() %}
+                UNION ALL
+                SELECT 
+                    '{{ model_name }}' as model_name,
+                    GETDATE() as comparison_timestamp,
+                    'min_{{ column.name }}' as metric_name,
+                    dev_stats.min_{{ column.name }}::VARCHAR as dev_value,
+                    uat_stats.min_{{ column.name }}::VARCHAR as uat_value,
+                    (dev_stats.min_{{ column.name }} - uat_stats.min_{{ column.name }})::NUMERIC(38,2) as difference,
+                    CASE 
+                        WHEN uat_stats.min_{{ column.name }} = 0 THEN NULL
+                        ELSE ((dev_stats.min_{{ column.name }}::FLOAT - uat_stats.min_{{ column.name }}) 
+                              / uat_stats.min_{{ column.name }} * 100)::NUMERIC(38,2)
+                    END as percent_change
+                FROM dev_stats, uat_stats
+
+                UNION ALL
+                SELECT 
+                    '{{ model_name }}' as model_name,
+                    GETDATE() as comparison_timestamp,
+                    'max_{{ column.name }}' as metric_name,
+                    dev_stats.max_{{ column.name }}::VARCHAR as dev_value,
+                    uat_stats.max_{{ column.name }}::VARCHAR as uat_value,
+                    (dev_stats.max_{{ column.name }} - uat_stats.max_{{ column.name }})::NUMERIC(38,2) as difference,
+                    CASE 
+                        WHEN uat_stats.max_{{ column.name }} = 0 THEN NULL
+                        ELSE ((dev_stats.max_{{ column.name }}::FLOAT - uat_stats.max_{{ column.name }}) 
+                              / uat_stats.max_{{ column.name }} * 100)::NUMERIC(38,2)
+                    END as percent_change
+                FROM dev_stats, uat_stats
+
+                UNION ALL
+                SELECT 
+                    '{{ model_name }}' as model_name,
+                    GETDATE() as comparison_timestamp,
+                    'avg_{{ column.name }}' as metric_name,
+                    dev_stats.avg_{{ column.name }}::VARCHAR as dev_value,
+                    uat_stats.avg_{{ column.name }}::VARCHAR as uat_value,
+                    (dev_stats.avg_{{ column.name }} - uat_stats.avg_{{ column.name }})::NUMERIC(38,2) as difference,
+                    CASE 
+                        WHEN uat_stats.avg_{{ column.name }} = 0 THEN NULL
+                        ELSE ((dev_stats.avg_{{ column.name }}::FLOAT - uat_stats.avg_{{ column.name }}) 
+                              / uat_stats.avg_{{ column.name }} * 100)::NUMERIC(38,2)
+                    END as percent_change
+                FROM dev_stats, uat_stats
+            {% endif %}
+        {% endfor %}
     )
     SELECT 
-        '{{ model_name }}' as model_name,
-        GETDATE() as comparison_timestamp,
-        'row_count' as metric_name,
-        dev_stats.row_count as dev_value,
-        uat_stats.row_count as uat_value,
-        dev_stats.row_count - uat_stats.row_count as difference,
-        CASE 
-            WHEN uat_stats.row_count = 0 THEN NULL
-            ELSE ((dev_stats.row_count::FLOAT - uat_stats.row_count) / uat_stats.row_count * 100)
-        END as percent_change
-    FROM dev_stats, uat_stats
-    {% for column in adapter.get_columns_in_relation(ref(model_name)) %}
-    UNION ALL
-    SELECT 
-        '{{ model_name }}' as model_name,
-        GETDATE() as comparison_timestamp,
-        'distinct_{{ column.name }}_count' as metric_name,
-        dev_stats.distinct_{{ column.name }}_count as dev_value,
-        uat_stats.distinct_{{ column.name }}_count as uat_value,
-        dev_stats.distinct_{{ column.name }}_count - uat_stats.distinct_{{ column.name }}_count as difference,
-        CASE 
-            WHEN uat_stats.distinct_{{ column.name }}_count = 0 THEN NULL
-            ELSE ((dev_stats.distinct_{{ column.name }}_count::FLOAT - uat_stats.distinct_{{ column.name }}_count) 
-                  / uat_stats.distinct_{{ column.name }}_count * 100)
-        END as percent_change
-    FROM dev_stats, uat_stats
-    {% endfor %}
+        model_name,
+        comparison_timestamp,
+        metric_name,
+        dev_value,
+        uat_value,
+        difference,
+        percent_change
+    FROM metrics
+    ORDER BY 
+        comparison_timestamp,
+        model_name,
+        metric_name
 {% endmacro %}
