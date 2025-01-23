@@ -170,9 +170,7 @@
         {% set output_path = '/tmp/' ~ model_name ~ '_comparison_' ~ timestamp ~ '.csv' %}
         
         {# Write to file #}
-        {% set f = modules.builtins.open(output_path, 'w') %}
-        {% do f.write('\n'.join(output_lines)) %}
-        {% do f.close() %}
+        {% do open(output_path, 'w').write('\n'.join(output_lines)) %}
         
         {# Print to console #}
         {{ log('=== Comparison Results ===', info=true) }}
@@ -183,6 +181,9 @@
             {{ log(line, info=true) }}
         {% endfor %}
     {% endif %}
+    
+    {{ return(results) }}
+{% endmacro %}
     
     {{ return(results) }}
 {% endmacro %}
