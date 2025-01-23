@@ -158,32 +158,14 @@
     {% set results = run_query(query) %}
     
     {% if execute %}
-        {# Create output content #}
-        {% set output_lines = [] %}
-        {% do output_lines.append('model_name,comparison_timestamp,metric_name,dev_value,uat_value,difference,percent_change') %}
+        {# Print header and CSV header #}
+        {{ log('model_name,comparison_timestamp,metric_name,dev_value,uat_value,difference,percent_change', info=true) }}
         
+        {# Print results in CSV format #}
         {% for row in results.rows %}
-            {% do output_lines.append(row[0] ~ ',' ~ row[1] ~ ',' ~ row[2] ~ ',' ~ row[3] ~ ',' ~ row[4] ~ ',' ~ row[5] ~ ',' ~ row[6]) %}
-        {% endfor %}
-
-        {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
-        {% set output_path = '/tmp/' ~ model_name ~ '_comparison_' ~ timestamp ~ '.csv' %}
-        
-        {# Write to file #}
-        {% do open(output_path, 'w').write('\n'.join(output_lines)) %}
-        
-        {# Print to console #}
-        {{ log('=== Comparison Results ===', info=true) }}
-        {{ log('Model Name: ' ~ model_name, info=true) }}
-        {{ log('Results saved to: ' ~ output_path, info=true) }}
-        {{ log('', info=true) }}
-        {% for line in output_lines %}
-            {{ log(line, info=true) }}
+            {{ log(row[0] ~ ',' ~ row[1] ~ ',' ~ row[2] ~ ',' ~ row[3] ~ ',' ~ row[4] ~ ',' ~ row[5] ~ ',' ~ row[6], info=true) }}
         {% endfor %}
     {% endif %}
-    
-    {{ return(results) }}
-{% endmacro %}
     
     {{ return(results) }}
 {% endmacro %}
