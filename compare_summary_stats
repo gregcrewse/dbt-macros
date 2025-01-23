@@ -1,8 +1,3 @@
-{# Helper macro to write output lines to a file #}
-{% macro write_output_lines(output_lines, output_path) %}
-    {% do dbt.write_file('\n'.join(output_lines), output_path) %}
-{% endmacro %}
-
 {# Helper macro to generate column stats #}
 {% macro get_column_stats_sql(columns) %}
     COUNT(*)::BIGINT as row_count
@@ -20,8 +15,8 @@
 
 {# Main comparison macro #}
 {% macro compare_schema_models(model_name) %}
-    {% set dev_schema = 'NULL' %}
-    {% set uat_schema = 'NULL' %}
+    {% set dev_schema = 'bdc_dw.edwh_dev' %}
+    {% set uat_schema = 'bdc_dw.edwh_uat' %}
     
     {% set model_relation = ref(model_name) %}
     {% set columns = adapter.get_columns_in_relation(model_relation) %}
@@ -163,6 +158,7 @@
     {% set results = run_query(query) %}
     
     {% if execute %}
+        {# Create output content #}
         {% set output_lines = [] %}
         {% do output_lines.append('model_name,comparison_timestamp,metric_name,dev_value,uat_value,difference,percent_change') %}
         
@@ -171,11 +167,14 @@
         {% endfor %}
 
         {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
-        {% set output_path = 'target/' ~ model_name ~ '_comparison_' ~ timestamp ~ '.csv' %}
+        {% set output_path = '/tmp/' ~ model_name ~ '_comparison_' ~ timestamp ~ '.csv' %}
         
-        {% do write_output_lines(output_lines, output_path) %}
+        {# Write to file #}
+        {% set f = modules.builtins.open(output_path, 'w') %}
+        {% do f.write('\n'.join(output_lines)) %}
+        {% do f.close() %}
         
-        {# Also print to console #}
+        {# Print to console #}
         {{ log('=== Comparison Results ===', info=true) }}
         {{ log('Model Name: ' ~ model_name, info=true) }}
         {{ log('Results saved to: ' ~ output_path, info=true) }}
