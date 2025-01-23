@@ -15,8 +15,8 @@
 
 {# Main comparison macro #}
 {% macro compare_schema_models(model_name) %}
-    {% set dev_schema = 'bdc_dw.edwh_dev' %}
-    {% set uat_schema = 'bdc_dw.edwh_uat' %}
+    {% set dev_schema = 'NULL' %}
+    {% set uat_schema = 'NULL' %}
     
     {% set model_relation = ref(model_name) %}
     {% set columns = adapter.get_columns_in_relation(model_relation) %}
