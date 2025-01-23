@@ -1,24 +1,3 @@
-{# branch_execution_comparison.sql #}
-{% macro compare_model_execution_results(model_name, target_branch='main', output_path=none) %}
-
-{# Store current branch name #}
-{% set current_branch = run_query('git rev-parse --abbrev-ref HEAD').columns[0][0] %}
-
-{# Set default output path if not provided #}
-{% if not output_path %}
-    {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
-    {% set output_path = '/tmp/execution_comparison_' ~ model_name ~ '_' ~ current_branch ~ '_vs_' ~ target_branch ~ '_' ~ timestamp ~ '.csv' %}
-{% endif %}
-
-{# Get downstream models #}
-{% set downstream_models = graph.downstream_nodes(model_name) %}
-
-{# Initialize results storage #}
-{% set results = {
-    'current_branch': {'name': current_branch, 'stats': {}},
-    'target_branch': {'name': target_branch, 'stats': {}}
-} %}
-
 {# Helper macro to collect statistics for a model #}
 {% macro collect_model_stats(model_ref) %}
     {% set stats = {} %}
@@ -92,60 +71,79 @@
     {{ return(branch_stats) }}
 {% endmacro %}
 
-{# Collect statistics for both branches #}
-{% do results.target_branch.stats.update(collect_branch_stats(target_branch, model_name, downstream_models)) %}
-{% do results.current_branch.stats.update(collect_branch_stats(current_branch, model_name, downstream_models)) %}
+{# Main comparison macro #}
+{% macro compare_model_execution_results(model_name, target_branch='main', output_path=none) %}
+    {# Store current branch name #}
+    {% set current_branch = run_query('git rev-parse --abbrev-ref HEAD').columns[0][0] %}
 
-{# Return to original branch #}
-{% do run_query('git checkout ' ~ current_branch) %}
+    {# Set default output path if not provided #}
+    {% if not output_path %}
+        {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
+        {% set output_path = '/tmp/execution_comparison_' ~ model_name ~ '_' ~ current_branch ~ '_vs_' ~ target_branch ~ '_' ~ timestamp ~ '.csv' %}
+    {% endif %}
 
-{# Prepare CSV output #}
-{% set csv_rows = [] %}
-{% set csv_header = ['timestamp', 'metric_type', 'model_name', 'column_name', 'metric_name', 
-                    target_branch ~ '_value', current_branch ~ '_value', 'difference', 'percent_change'] %}
+    {# Get downstream models #}
+    {% set downstream_models = graph.downstream_nodes(model_name) %}
 
-{# Add rows for each metric #}
-{% for branch_model, stats in results.target_branch.stats.items() %}
-    {% set current_stats = results.current_branch.stats[branch_model] %}
-    
-    {% for metric, value in stats.items() %}
-        {% set current_value = current_stats[metric] %}
-        {% set metric_parts = metric.split('_') %}
-        {% set metric_type = metric_parts[0] %}  {# first part of metric name #}
-        {% set column_name = metric_parts[1:] | join('_') if metric_parts[1:] else 'N/A' %}
+    {# Initialize results storage #}
+    {% set results = {
+        'current_branch': {'name': current_branch, 'stats': {}},
+        'target_branch': {'name': target_branch, 'stats': {}}
+    } %}
+
+    {# Collect statistics for both branches #}
+    {% do results.target_branch.stats.update(collect_branch_stats(target_branch, model_name, downstream_models)) %}
+    {% do results.current_branch.stats.update(collect_branch_stats(current_branch, model_name, downstream_models)) %}
+
+    {# Return to original branch #}
+    {% do run_query('git checkout ' ~ current_branch) %}
+
+    {# Prepare CSV output #}
+    {% set csv_rows = [] %}
+    {% set csv_header = ['timestamp', 'metric_type', 'model_name', 'column_name', 'metric_name', 
+                        target_branch ~ '_value', current_branch ~ '_value', 'difference', 'percent_change'] %}
+
+    {# Add rows for each metric #}
+    {% for branch_model, stats in results.target_branch.stats.items() %}
+        {% set current_stats = results.current_branch.stats[branch_model] %}
         
-        {% set difference = none %}
-        {% set percent_change = none %}
-        
-        {% if value is number and current_value is number %}
-            {% set difference = current_value - value %}
-            {% if value != 0 %}
-                {% set percent_change = ((current_value - value) / value * 100) | round(2) %}
+        {% for metric, value in stats.items() %}
+            {% set current_value = current_stats[metric] %}
+            {% set metric_parts = metric.split('_') %}
+            {% set metric_type = metric_parts[0] %}  {# first part of metric name #}
+            {% set column_name = metric_parts[1:] | join('_') if metric_parts[1:] else 'N/A' %}
+            
+            {% set difference = none %}
+            {% set percent_change = none %}
+            
+            {% if value is number and current_value is number %}
+                {% set difference = current_value - value %}
+                {% if value != 0 %}
+                    {% set percent_change = ((current_value - value) / value * 100) | round(2) %}
+                {% endif %}
             {% endif %}
-        {% endif %}
-        
-        {% do csv_rows.append([
-            modules.datetime.datetime.now(),
-            metric_type,
-            branch_model,
-            column_name,
-            metric,
-            value,
-            current_value,
-            difference,
-            percent_change
-        ]) %}
+            
+            {% do csv_rows.append([
+                modules.datetime.datetime.now(),
+                metric_type,
+                branch_model,
+                column_name,
+                metric,
+                value,
+                current_value,
+                difference,
+                percent_change
+            ]) %}
+        {% endfor %}
     {% endfor %}
-{% endfor %}
 
-{# Write to CSV file #}
-{% do modules.csv.writer(open(output_path, 'w')).writerows([csv_header] + csv_rows) %}
+    {# Write to CSV file #}
+    {% do modules.csv.writer(open(output_path, 'w')).writerows([csv_header] + csv_rows) %}
 
-{# Return results dictionary #}
-{{ return({
-    'results': results,
-    'csv_output_path': output_path,
-    'analyzed_models': [model_name] + downstream_models | map(attribute='name') | list
-}) }}
-
+    {# Return results dictionary #}
+    {{ return({
+        'results': results,
+        'csv_output_path': output_path,
+        'analyzed_models': [model_name] + downstream_models | map(attribute='name') | list
+    }) }}
 {% endmacro %}
