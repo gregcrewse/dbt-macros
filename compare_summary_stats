@@ -64,7 +64,7 @@
     
     {# Collect stats for downstream models #}
     {% for downstream in downstream_models %}
-        {% set downstream_ref = ref(downstream.name) %}
+        {% set downstream_ref = ref(downstream.name.split('.')[-1]) %}
         {% do branch_stats.update({downstream.name: collect_model_stats(downstream_ref)}) %}
     {% endfor %}
     
@@ -83,7 +83,15 @@
     {% endif %}
 
     {# Get downstream models #}
-    {% set downstream_models = graph.downstream_nodes(model_name) %}
+    {% set downstream_models = [] %}
+    {% for node in graph.nodes.values() %}
+        {% if node.resource_type == 'model' %}
+            {% set upstream_nodes = node.depends_on.nodes %}
+            {% if model_name in upstream_nodes %}
+                {% do downstream_models.append(node) %}
+            {% endif %}
+        {% endif %}
+    {% endfor %}
 
     {# Initialize results storage #}
     {% set results = {
