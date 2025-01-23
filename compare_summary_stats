@@ -13,31 +13,40 @@
 {% endmacro %}
 
 {# Helper macro to collect statistics for a model #}
-{% macro collect_model_stats(model_relation) %}
+{% macro collect_model_stats(schema_name, model_name) %}
     {% set stats = {} %}
     
     {% if execute %}
-        {% set columns = adapter.get_columns_in_relation(model_relation) %}
+        {# Get relation from specific schema #}
+        {% set relation = adapter.get_relation(
+            database=target.database,
+            schema=schema_name,
+            identifier=model_name
+        ) %}
         
-        {% set stats_query %}
-            SELECT 
-                COUNT(*) as row_count
-                {% for column in columns %}
-                    {% if column.is_number() or column.is_string() or column.is_datetime() %}
-                        ,COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
-                        {% if column.is_number() %}
-                            ,AVG({{ column.name }})::NUMERIC(38,2) as avg_{{ column.name }}
-                            ,MIN({{ column.name }}) as min_{{ column.name }}
-                            ,MAX({{ column.name }}) as max_{{ column.name }}
+        {% if relation %}
+            {% set columns = adapter.get_columns_in_relation(relation) %}
+            
+            {% set stats_query %}
+                SELECT 
+                    COUNT(*) as row_count
+                    {% for column in columns %}
+                        {% if column.is_number() or column.is_string() or column.is_datetime() %}
+                            ,COUNT(DISTINCT {{ column.name }}) as distinct_{{ column.name }}_count
+                            {% if column.is_number() %}
+                                ,AVG({{ column.name }})::NUMERIC(38,2) as avg_{{ column.name }}
+                                ,MIN({{ column.name }}) as min_{{ column.name }}
+                                ,MAX({{ column.name }}) as max_{{ column.name }}
+                            {% endif %}
                         {% endif %}
-                    {% endif %}
-                {% endfor %}
-            FROM {{ model_relation }}
-        {% endset %}
-        
-        {% set results = run_query(stats_query) %}
-        {% if results %}
-            {% do stats.update(results.rows[0]) %}
+                    {% endfor %}
+                FROM {{ relation }}
+            {% endset %}
+            
+            {% set results = run_query(stats_query) %}
+            {% if results %}
+                {% do stats.update(results.rows[0]) %}
+            {% endif %}
         {% endif %}
     {% endif %}
     
@@ -45,7 +54,13 @@
 {% endmacro %}
 
 {# Main comparison macro #}
-{% macro compare_model_execution_results(model_name, comparison_schema='dbt_model_comparison', output_table='model_comparison_results') %}
+{% macro compare_schema_models(
+    model_name,
+    dev_schema='NULL',
+    uat_schema='NULL',
+    output_schema='NULL',
+    output_table='model_comparison_results'
+) %}
     {% set results = {} %}
     
     {% if execute %}
@@ -54,86 +69,83 @@
         
         {# Initialize results #}
         {% set results = {
-            'prod': {'stats': {}},
+            'uat': {'stats': {}},
             'dev': {'stats': {}}
         } %}
         
-        {# Create comparison schema if it doesn't exist #}
-        {% do run_query('CREATE SCHEMA IF NOT EXISTS ' ~ comparison_schema) %}
-        
-        {# Collect current (dev) stats #}
-        {% do results.dev.stats.update({model_name: collect_model_stats(ref(model_name))}) %}
-        {% for downstream in downstream_models %}
-            {% do results.dev.stats.update({downstream: collect_model_stats(ref(downstream))}) %}
-        {% endfor %}
-        
-        {# Collect prod stats using prod schema #}
-        {% set prod_model = adapter.get_relation(
-            database=target.database,
-            schema=target.schema,
-            identifier=model_name
-        ) %}
-        
-        {% if prod_model %}
-            {% do results.prod.stats.update({model_name: collect_model_stats(prod_model)}) %}
-            
-            {% for downstream in downstream_models %}
-                {% set prod_downstream = adapter.get_relation(
-                    database=target.database,
-                    schema=target.schema,
-                    identifier=downstream
-                ) %}
-                {% if prod_downstream %}
-                    {% do results.prod.stats.update({downstream: collect_model_stats(prod_downstream)}) %}
-                {% endif %}
-            {% endfor %}
-        {% endif %}
-        
-        {# Create or replace comparison results table #}
-        {% set comparison_query %}
-            CREATE TABLE IF NOT EXISTS {{ comparison_schema }}.{{ output_table }} (
-                timestamp TIMESTAMP,
-                model VARCHAR(255),
-                metric VARCHAR(255),
-                prod_value VARCHAR(255),
+        {# Create output table if it doesn't exist #}
+        {% set create_table_query %}
+            CREATE TABLE IF NOT EXISTS {{ output_schema }}.{{ output_table }} (
+                comparison_timestamp TIMESTAMP,
+                model_name VARCHAR(255),
+                metric_name VARCHAR(255),
+                uat_value VARCHAR(255),
                 dev_value VARCHAR(255),
                 difference NUMERIC(38,2),
                 percent_change NUMERIC(38,2)
             );
-            
-            TRUNCATE TABLE {{ comparison_schema }}.{{ output_table }};
-            
-            {% for model, prod_stats in results.prod.stats.items() %}
-                {% set dev_stats = results.dev.stats[model] %}
-                {% for metric, prod_value in prod_stats.items() %}
-                    {% set dev_value = dev_stats[metric] %}
-                    {% set difference = none %}
-                    {% set percent_change = none %}
-                    
-                    {% if prod_value is number and dev_value is number %}
-                        {% set difference = dev_value - prod_value %}
-                        {% if prod_value != 0 %}
-                            {% set percent_change = ((dev_value - prod_value) / prod_value * 100) %}
-                        {% endif %}
+        {% endset %}
+        {% do run_query(create_table_query) %}
+        
+        {# Collect dev stats #}
+        {% do results.dev.stats.update({model_name: collect_model_stats(dev_schema, model_name)}) %}
+        {% for downstream in downstream_models %}
+            {% do results.dev.stats.update({downstream: collect_model_stats(dev_schema, downstream)}) %}
+        {% endfor %}
+        
+        {# Collect UAT stats #}
+        {% do results.uat.stats.update({model_name: collect_model_stats(uat_schema, model_name)}) %}
+        {% for downstream in downstream_models %}
+            {% do results.uat.stats.update({downstream: collect_model_stats(uat_schema, downstream)}) %}
+        {% endfor %}
+        
+        {# Clear existing results for these models #}
+        {% set clear_results_query %}
+            DELETE FROM {{ output_schema }}.{{ output_table }}
+            WHERE model_name IN (
+                '{{ model_name }}'
+                {% for downstream in downstream_models %}
+                    ,'{{ downstream }}'
+                {% endfor %}
+            );
+        {% endset %}
+        {% do run_query(clear_results_query) %}
+        
+        {# Insert comparison results #}
+        {% for model, uat_stats in results.uat.stats.items() %}
+            {% set dev_stats = results.dev.stats[model] %}
+            {% for metric, uat_value in uat_stats.items() %}
+                {% set dev_value = dev_stats[metric] %}
+                {% set difference = none %}
+                {% set percent_change = none %}
+                
+                {% if uat_value is number and dev_value is number %}
+                    {% set difference = dev_value - uat_value %}
+                    {% if uat_value != 0 %}
+                        {% set percent_change = ((dev_value - uat_value) / uat_value * 100) %}
                     {% endif %}
-                    
-                    INSERT INTO {{ comparison_schema }}.{{ output_table }}
+                {% endif %}
+                
+                {% set insert_query %}
+                    INSERT INTO {{ output_schema }}.{{ output_table }}
                     VALUES (
                         GETDATE(),
                         '{{ model }}',
                         '{{ metric }}',
-                        '{{ prod_value }}',
+                        '{{ uat_value }}',
                         '{{ dev_value }}',
                         {{ difference if difference is not none else 'NULL' }},
                         {{ percent_change if percent_change is not none else 'NULL' }}
                     );
-                {% endfor %}
+                {% endset %}
+                {% do run_query(insert_query) %}
             {% endfor %}
-        {% endset %}
+        {% endfor %}
         
-        {% do run_query(comparison_query) %}
-        
-        {# Return the name of the comparison table for reference #}
-        {{ return({'comparison_table': comparison_schema ~ '.' ~ output_table}) }}
+        {# Return the comparison table location #}
+        {{ return({
+            'comparison_table': output_schema ~ '.' ~ output_table,
+            'compared_models': [model_name] + downstream_models
+        }) }}
     {% endif %}
 {% endmacro %}
