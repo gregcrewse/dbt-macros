@@ -138,12 +138,15 @@
     {% endset %}
 
     {% set results = run_query(query) %}
-    {% set csv_path = '/tmp/model_comparison_' ~ model_name ~ '_' ~ modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') ~ '.csv' %}
     
     {% if execute %}
-        {% set csv_header = ['model_name', 'comparison_timestamp', 'metric_name', 'dev_value', 'uat_value', 'difference', 'percent_change'] %}
-        {% do modules.csv.writer(open(csv_path, 'w')).writerows([csv_header] + results.rows) %}
-        {{ log('Results saved to CSV: ' ~ csv_path, info=true) }}
+        {{ log('=== Comparison Results ===', info=true) }}
+        {{ log('Model Name: ' ~ model_name, info=true) }}
+        {{ log('', info=true) }}
+        {{ log('model_name,comparison_timestamp,metric_name,dev_value,uat_value,difference,percent_change', info=true) }}
+        {% for row in results.rows %}
+            {{ log(row[0] ~ ',' ~ row[1] ~ ',' ~ row[2] ~ ',' ~ row[3] ~ ',' ~ row[4] ~ ',' ~ row[5] ~ ',' ~ row[6], info=true) }}
+        {% endfor %}
     {% endif %}
     
     {{ return(results) }}
