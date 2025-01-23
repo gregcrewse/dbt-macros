@@ -25,8 +25,8 @@
     {% endfor %}
 {% endmacro %}
 
-{# Main comparison macro #}
-{% macro compare_schema_models(model_name) %}
+{# Macro to generate comparison query #}
+{% macro get_comparison_query(model_name) %}
     {% set dev_schema = 'NULL' %}
     {% set uat_schema = 'NULL' %}
     
@@ -134,4 +134,22 @@
         comparison_timestamp,
         model_name,
         metric_name
+{% endmacro %}
+
+{# Main comparison macro with CSV output #}
+{% macro compare_schema_models(model_name) %}
+    {% set query %}
+        {{ get_comparison_query(model_name) }}
+    {% endset %}
+    
+    {% set results = run_query(query) %}
+    {% set csv_path = '/tmp/model_comparison_' ~ model_name ~ '_' ~ modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') ~ '.csv' %}
+    
+    {% if execute %}
+        {% set csv_header = ['model_name', 'comparison_timestamp', 'metric_name', 'dev_value', 'uat_value', 'difference', 'percent_change'] %}
+        {% do modules.csv.writer(open(csv_path, 'w')).writerows([csv_header] + results.rows) %}
+        {{ log('Results saved to CSV: ' ~ csv_path, info=true) }}
+    {% endif %}
+    
+    {{ return(results) }}
 {% endmacro %}
