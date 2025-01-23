@@ -1,0 +1,218 @@
+{# branch_model_changes.sql #}
+{% macro analyze_branch_changes(target_branch='main', output_path=none) %}
+
+{# Get git branch information using dbt-core's run-operation #}
+{% set current_branch = run_query('git rev-parse --abbrev-ref HEAD').columns[0][0] %}
+{% if not output_path %}
+    {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
+    {% set output_path = '/tmp/branch_changes_' ~ current_branch ~ '_vs_' ~ target_branch ~ '_' ~ timestamp ~ '.csv' %}
+{% endif %}
+
+{# Get list of changed SQL files between branches #}
+{% set changed_files_query %}
+git diff --name-only {{ target_branch }}...{{ current_branch }} -- '*.sql'
+{% endset %}
+{% set changed_files = run_query(changed_files_query).columns[0] %}
+
+{# Initialize results storage #}
+{% set results = [] %}
+{% set all_downstream_impacts = [] %}
+
+{# Process each changed file #}
+{% for file_path in changed_files %}
+    {% if file_path.endswith('.sql') and not file_path.endswith('schema.yml') %}
+        {# Get old and new file content #}
+        {% set old_content_query %}
+        git show {{ target_branch }}:{{ file_path }}
+        {% endset %}
+        {% set new_content_query %}
+        git show {{ current_branch }}:{{ file_path }}
+        {% endset %}
+        
+        {% set old_content = run_query(old_content_query) %}
+        {% set new_content = run_query(new_content_query) %}
+        
+        {# Extract model name from file path #}
+        {% set model_name = file_path | replace('.sql', '') | replace('models/', '') %}
+        
+        {# Parse SQL to extract column information #}
+        {% set old_columns = extract_columns_from_sql(old_content) %}
+        {% set new_columns = extract_columns_from_sql(new_content) %}
+        
+        {# Compare columns and their changes #}
+        {% set column_changes = [] %}
+        {% for col in old_columns %}
+            {% set found_in_new = false %}
+            {% for new_col in new_columns %}
+                {% if col.name == new_col.name %}
+                    {% set found_in_new = true %}
+                    {% if col.data_type != new_col.data_type %}
+                        {% do column_changes.append({
+                            'model': model_name,
+                            'column': col.name,
+                            'change_type': 'TYPE_CHANGED',
+                            'old_value': col.data_type,
+                            'new_value': new_col.data_type
+                        }) %}
+                    {% endif %}
+                {% endif %}
+            {% endfor %}
+            {% if not found_in_new %}
+                {% do column_changes.append({
+                    'model': model_name,
+                    'column': col.name,
+                    'change_type': 'REMOVED',
+                    'old_value': col.data_type,
+                    'new_value': none
+                }) %}
+            {% endif %}
+        {% endfor %}
+        
+        {# Check for new columns #}
+        {% for new_col in new_columns %}
+            {% set found_in_old = false %}
+            {% for old_col in old_columns %}
+                {% if new_col.name == old_col.name %}
+                    {% set found_in_old = true %}
+                {% endif %}
+            {% endfor %}
+            {% if not found_in_old %}
+                {% do column_changes.append({
+                    'model': model_name,
+                    'column': new_col.name,
+                    'change_type': 'ADDED',
+                    'old_value': none,
+                    'new_value': new_col.data_type
+                }) %}
+            {% endif %}
+        {% endfor %}
+        
+        {# Get downstream dependencies #}
+        {% set downstream_models = graph.downstream_nodes(model_name) %}
+        
+        {# Analyze impact on downstream models #}
+        {% for downstream_model in downstream_models %}
+            {% set downstream_sql = run_query('cat ' ~ downstream_model.path) %}
+            {% set downstream_columns = extract_columns_from_sql(downstream_sql) %}
+            
+            {% for change in column_changes %}
+                {% for downstream_col in downstream_columns %}
+                    {% if downstream_col.references_column(change.column, model_name) %}
+                        {% do all_downstream_impacts.append({
+                            'source_model': model_name,
+                            'source_column': change.column,
+                            'change_type': change.change_type,
+                            'impacted_model': downstream_model.name,
+                            'impacted_column': downstream_col.name
+                        }) %}
+                    {% endif %}
+                {% endfor %}
+            {% endfor %}
+        {% endfor %}
+        
+        {% do results.extend(column_changes) %}
+    {% endif %}
+{% endfor %}
+
+{# Write results to CSV #}
+{% set csv_header = ['timestamp', 'source_model', 'column', 'change_type', 'old_value', 'new_value', 
+                    'impacted_model', 'impacted_column'] %}
+{% set csv_rows = [] %}
+
+{# Add direct changes #}
+{% for change in results %}
+    {% do csv_rows.append([
+        modules.datetime.datetime.now(),
+        change.model,
+        change.column,
+        change.change_type,
+        change.old_value,
+        change.new_value,
+        none,
+        none
+    ]) %}
+{% endfor %}
+
+{# Add downstream impacts #}
+{% for impact in all_downstream_impacts %}
+    {% do csv_rows.append([
+        modules.datetime.datetime.now(),
+        impact.source_model,
+        impact.source_column,
+        impact.change_type,
+        none,
+        none,
+        impact.impacted_model,
+        impact.impacted_column
+    ]) %}
+{% endfor %}
+
+{# Write to CSV file #}
+{% do modules.csv.writer(open(output_path, 'w')).writerows([csv_header] + csv_rows) %}
+
+{# Return results dictionary #}
+{{ return({
+    'direct_changes': results,
+    'downstream_impacts': all_downstream_impacts,
+    'csv_output_path': output_path,
+    'analyzed_files': changed_files
+}) }}
+
+{% endmacro %}
+
+{# Helper macro to extract columns from SQL #}
+{% macro extract_columns_from_sql(sql_content) %}
+    {% set parsed = modules.sqlparse.parse(sql_content) %}
+    {% set columns = [] %}
+    
+    {# Extract column definitions #}
+    {% for statement in parsed %}
+        {% if statement.get_type() == 'SELECT' %}
+            {% for token in statement.tokens if token.is_group %}
+                {% if token.ttype == 'SELECT' %}
+                    {% for column in token.get_identifiers() %}
+                        {% do columns.append({
+                            'name': column.get_name(),
+                            'data_type': infer_data_type(column),
+                            'references': get_column_references(column)
+                        }) %}
+                    {% endfor %}
+                {% endif %}
+            {% endfor %}
+        {% endif %}
+    {% endfor %}
+    
+    {{ return(columns) }}
+{% endmacro %}
+
+{# Helper macro to infer data type from SQL expression #}
+{% macro infer_data_type(column_token) %}
+    {# Basic type inference logic - can be expanded #}
+    {% if column_token.has_alias() %}
+        {% set expression = column_token.get_real_name() %}
+    {% else %}
+        {% set expression = column_token.get_name() %}
+    {% endif %}
+    
+    {% if expression matches '(^|\s)(sum|avg|count)\(' %}
+        {{ return('numeric') }}
+    {% elif expression matches '(^|\s)cast\((.*) as ' %}
+        {{ return(expression.split(' as ')[1] | trim) }}
+    {% else %}
+        {{ return('unknown') }}
+    {% endif %}
+{% endmacro %}
+
+{# Helper macro to get column references #}
+{% macro get_column_references(column_token) %}
+    {% set references = [] %}
+    {% for token in column_token.tokens if token.is_group %}
+        {% if token.is_identifier() %}
+            {% do references.append({
+                'table': token.get_parent_name(),
+                'column': token.get_name()
+            }) %}
+        {% endif %}
+    {% endfor %}
+    {{ return(references) }}
+{% endmacro %}
