@@ -45,84 +45,95 @@
 {% endmacro %}
 
 {# Main comparison macro #}
-{% macro compare_model_execution_results(model_name, target_branch='main', output_path=none) %}
-    {% if not output_path %}
-        {% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
-        {% set output_path = '/tmp/execution_comparison_' ~ model_name ~ '_' ~ timestamp ~ '.csv' %}
-    {% endif %}
-
+{% macro compare_model_execution_results(model_name, comparison_schema='dbt_model_comparison', output_table='model_comparison_results') %}
     {% set results = {} %}
     
     {% if execute %}
-        {# Get the current branch #}
-        {% set current_branch = run_query('git rev-parse --abbrev-ref HEAD').columns[0][0] %}
-        
         {# Get downstream models #}
         {% set downstream_models = get_downstream_models(model_name) %}
         
         {# Initialize results #}
         {% set results = {
-            'target': {'branch': target_branch, 'stats': {}},
-            'current': {'branch': current_branch, 'stats': {}}
+            'prod': {'stats': {}},
+            'dev': {'stats': {}}
         } %}
         
-        {# Analyze target branch #}
-        {% do run_query('git checkout ' ~ target_branch) %}
-        {% do run_query('dbt run --models ' ~ model_name ~ ' ' ~ downstream_models | join(' ')) %}
+        {# Create comparison schema if it doesn't exist #}
+        {% do run_query('CREATE SCHEMA IF NOT EXISTS ' ~ comparison_schema) %}
         
-        {# Collect target branch stats #}
-        {% do results.target.stats.update({model_name: collect_model_stats(ref(model_name))}) %}
+        {# Collect current (dev) stats #}
+        {% do results.dev.stats.update({model_name: collect_model_stats(ref(model_name))}) %}
         {% for downstream in downstream_models %}
-            {% do results.target.stats.update({downstream: collect_model_stats(ref(downstream))}) %}
+            {% do results.dev.stats.update({downstream: collect_model_stats(ref(downstream))}) %}
         {% endfor %}
         
-        {# Analyze current branch #}
-        {% do run_query('git checkout ' ~ current_branch) %}
-        {% do run_query('dbt run --models ' ~ model_name ~ ' ' ~ downstream_models | join(' ')) %}
+        {# Collect prod stats using prod schema #}
+        {% set prod_model = adapter.get_relation(
+            database=target.database,
+            schema=target.schema,
+            identifier=model_name
+        ) %}
         
-        {# Collect current branch stats #}
-        {% do results.current.stats.update({model_name: collect_model_stats(ref(model_name))}) %}
-        {% for downstream in downstream_models %}
-            {% do results.current.stats.update({downstream: collect_model_stats(ref(downstream))}) %}
-        {% endfor %}
-        
-        {# Create CSV output #}
-        {% set csv_rows = [] %}
-        {% set csv_header = ['timestamp', 'model', 'metric', target_branch ~ '_value', 
-                           current_branch ~ '_value', 'difference', 'percent_change'] %}
-        
-        {% for model, target_stats in results.target.stats.items() %}
-            {% set current_stats = results.current.stats[model] %}
-            {% for metric, target_value in target_stats.items() %}
-                {% set current_value = current_stats[metric] %}
-                {% set difference = none %}
-                {% set percent_change = none %}
-                
-                {% if target_value is number and current_value is number %}
-                    {% set difference = current_value - target_value %}
-                    {% if target_value != 0 %}
-                        {% set percent_change = ((current_value - target_value) / target_value * 100) | round(2) %}
-                    {% endif %}
+        {% if prod_model %}
+            {% do results.prod.stats.update({model_name: collect_model_stats(prod_model)}) %}
+            
+            {% for downstream in downstream_models %}
+                {% set prod_downstream = adapter.get_relation(
+                    database=target.database,
+                    schema=target.schema,
+                    identifier=downstream
+                ) %}
+                {% if prod_downstream %}
+                    {% do results.prod.stats.update({downstream: collect_model_stats(prod_downstream)}) %}
                 {% endif %}
-                
-                {% do csv_rows.append([
-                    modules.datetime.datetime.now(),
-                    model,
-                    metric,
-                    target_value,
-                    current_value,
-                    difference,
-                    percent_change
-                ]) %}
             {% endfor %}
-        {% endfor %}
+        {% endif %}
         
-        {# Write CSV file #}
-        {% do modules.csv.writer(open(output_path, 'w')).writerows([csv_header] + csv_rows) %}
+        {# Create or replace comparison results table #}
+        {% set comparison_query %}
+            CREATE TABLE IF NOT EXISTS {{ comparison_schema }}.{{ output_table }} (
+                timestamp TIMESTAMP,
+                model VARCHAR(255),
+                metric VARCHAR(255),
+                prod_value VARCHAR(255),
+                dev_value VARCHAR(255),
+                difference NUMERIC(38,2),
+                percent_change NUMERIC(38,2)
+            );
+            
+            TRUNCATE TABLE {{ comparison_schema }}.{{ output_table }};
+            
+            {% for model, prod_stats in results.prod.stats.items() %}
+                {% set dev_stats = results.dev.stats[model] %}
+                {% for metric, prod_value in prod_stats.items() %}
+                    {% set dev_value = dev_stats[metric] %}
+                    {% set difference = none %}
+                    {% set percent_change = none %}
+                    
+                    {% if prod_value is number and dev_value is number %}
+                        {% set difference = dev_value - prod_value %}
+                        {% if prod_value != 0 %}
+                            {% set percent_change = ((dev_value - prod_value) / prod_value * 100) %}
+                        {% endif %}
+                    {% endif %}
+                    
+                    INSERT INTO {{ comparison_schema }}.{{ output_table }}
+                    VALUES (
+                        GETDATE(),
+                        '{{ model }}',
+                        '{{ metric }}',
+                        '{{ prod_value }}',
+                        '{{ dev_value }}',
+                        {{ difference if difference is not none else 'NULL' }},
+                        {{ percent_change if percent_change is not none else 'NULL' }}
+                    );
+                {% endfor %}
+            {% endfor %}
+        {% endset %}
         
-        {# Return to original branch #}
-        {% do run_query('git checkout ' ~ current_branch) %}
+        {% do run_query(comparison_query) %}
+        
+        {# Return the name of the comparison table for reference #}
+        {{ return({'comparison_table': comparison_schema ~ '.' ~ output_table}) }}
     {% endif %}
-    
-    {{ return({'results': results, 'csv_path': output_path}) }}
 {% endmacro %}
