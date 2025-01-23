@@ -53,16 +53,6 @@
     {{ return(stats) }}
 {% endmacro %}
 
--- macros/model_comparison_macros.sql
-{# Same helper macros as before #}
-{% macro get_downstream_models(model_name) %}
-    -- ... (keep this macro the same)
-{% endmacro %}
-
-{% macro collect_model_stats(schema_name, model_name) %}
-    -- ... (keep this macro the same)
-{% endmacro %}
-
 {% macro compare_schema_models(model_name) %}
     {{ return(run_query(get_comparison_query(model_name))) }}
 {% endmacro %}
