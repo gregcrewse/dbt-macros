@@ -1,0 +1,232 @@
+{# models_comparison_analysis.sql #}
+{% macro analyze_model_changes(old_model_1, old_model_2, new_model, downstream_models=none) %}
+
+{# Step 1: Get column information for all models #}
+{% set old_cols_1 = adapter.get_columns_in_relation(ref(old_model_1)) %}
+{% set old_cols_2 = adapter.get_columns_in_relation(ref(old_model_2)) %}
+{% set new_cols = adapter.get_columns_in_relation(ref(new_model)) %}
+
+{# Create temporary tables to store analysis results #}
+{% set temp_analysis_table = model.schema ~ '_temp_model_analysis' %}
+{% set temp_impact_table = model.schema ~ '_temp_impact_analysis' %}
+
+{# Step 2: Analyze field mappings and changes #}
+{% set field_analysis_query %}
+WITH old_fields AS (
+    SELECT 
+        column_name,
+        data_type,
+        'old_model_1' as source_model
+    FROM {{ information_schema }}.columns
+    WHERE table_name = '{{ old_model_1 }}'
+    UNION ALL
+    SELECT 
+        column_name,
+        data_type,
+        'old_model_2' as source_model
+    FROM {{ information_schema }}.columns
+    WHERE table_name = '{{ old_model_2 }}'
+),
+new_fields AS (
+    SELECT 
+        column_name,
+        data_type
+    FROM {{ information_schema }}.columns
+    WHERE table_name = '{{ new_model }}'
+),
+field_comparison AS (
+    SELECT 
+        COALESCE(o.column_name, n.column_name) as field_name,
+        o.source_model as old_location,
+        o.data_type as old_type,
+        n.data_type as new_type,
+        CASE 
+            WHEN o.column_name IS NULL THEN 'New field'
+            WHEN n.column_name IS NULL THEN 'Removed field'
+            WHEN o.data_type != n.data_type THEN 'Type changed'
+            ELSE 'Unchanged'
+        END as change_type
+    FROM old_fields o
+    FULL OUTER JOIN new_fields n ON o.column_name = n.column_name
+)
+SELECT * INTO {{ temp_analysis_table }} FROM field_comparison;
+{% endset %}
+
+{# Step 3: Analyze downstream impact if downstream_models is provided #}
+{% if downstream_models %}
+{% set downstream_impact_query %}
+WITH downstream_columns AS (
+    {% for model in downstream_models %}
+    SELECT 
+        '{{ model }}' as model_name,
+        column_name,
+        data_type
+    FROM {{ information_schema }}.columns
+    WHERE table_name = '{{ model }}'
+    {% if not loop.last %} UNION ALL {% endif %}
+    {% endfor %}
+),
+impacted_fields AS (
+    SELECT 
+        d.model_name,
+        d.column_name,
+        a.change_type as source_field_change,
+        a.field_name as source_field_name
+    FROM downstream_columns d
+    JOIN {{ temp_analysis_table }} a
+        ON d.column_name LIKE '%' || a.field_name || '%'
+        OR d.column_name = a.field_name
+    WHERE a.change_type != 'Unchanged'
+)
+SELECT * INTO {{ temp_impact_table }} FROM impacted_fields;
+{% endset %}
+{% endif %}
+
+{# Step 4: Statistical comparison between old and new models #}
+{% set stats_comparison_query %}
+WITH old_stats_1 AS (
+    SELECT 
+        '{{ old_model_1 }}' as model_name,
+        COUNT(*) as row_count,
+        {% for col in old_cols_1 %}
+        COUNT(DISTINCT {{ col.name }}) as distinct_{{ col.name }}_count
+        {% if not loop.last %},{% endif %}
+        {% endfor %}
+    FROM {{ ref(old_model_1) }}
+),
+old_stats_2 AS (
+    SELECT 
+        '{{ old_model_2 }}' as model_name,
+        COUNT(*) as row_count,
+        {% for col in old_cols_2 %}
+        COUNT(DISTINCT {{ col.name }}) as distinct_{{ col.name }}_count
+        {% if not loop.last %},{% endif %}
+        {% endfor %}
+    FROM {{ ref(old_model_2) }}
+),
+new_stats AS (
+    SELECT 
+        '{{ new_model }}' as model_name,
+        COUNT(*) as row_count,
+        {% for col in new_cols %}
+        COUNT(DISTINCT {{ col.name }}) as distinct_{{ col.name }}_count
+        {% if not loop.last %},{% endif %}
+        {% endfor %}
+    FROM {{ ref(new_model) }}
+)
+SELECT 
+    CASE 
+        WHEN old_stats_1.row_count != new_stats.row_count THEN 
+            'Row count changed: ' || old_stats_1.row_count || ' -> ' || new_stats.row_count
+        ELSE 'Row count unchanged'
+    END as row_count_analysis,
+    {% for col in new_cols %}
+    CASE 
+        WHEN old_stats_1.distinct_{{ col.name }}_count != new_stats.distinct_{{ col.name }}_count THEN
+            'Distinct values changed for {{ col.name }}: ' || 
+            COALESCE(old_stats_1.distinct_{{ col.name }}_count::text, 'N/A') || ' -> ' || 
+            new_stats.distinct_{{ col.name }}_count
+        ELSE 'No change in distinct values for {{ col.name }}'
+    END as {{ col.name }}_analysis
+    {% if not loop.last %},{% endif %}
+    {% endfor %}
+INTO {{ temp_analysis_table ~ '_stats' }};
+{% endset %}
+
+{# Execute all analysis queries #}
+{% do run_query(field_analysis_query) %}
+{% if downstream_models %}
+    {% do run_query(downstream_impact_query) %}
+{% endif %}
+{% do run_query(stats_comparison_query) %}
+
+{# Create CSV output #}
+{% set timestamp = modules.datetime.datetime.now().strftime('%Y%m%d_%H%M%S') %}
+{% set csv_output_path = '/tmp/' ~ new_model ~ '_analysis_' ~ timestamp ~ '.csv' %}
+
+{% set csv_query %}
+WITH field_analysis_csv AS (
+    SELECT 
+        'Field Analysis' as analysis_type,
+        field_name,
+        old_location,
+        old_type,
+        new_type,
+        change_type,
+        NULL as model_name,
+        NULL as source_field_name,
+        NULL as metric_name,
+        NULL as metric_value
+    FROM {{ temp_analysis_table }}
+),
+stats_csv AS (
+    SELECT 
+        'Statistics Comparison' as analysis_type,
+        NULL as field_name,
+        NULL as old_location,
+        NULL as old_type,
+        NULL as new_type,
+        NULL as change_type,
+        NULL as model_name,
+        NULL as source_field_name,
+        key as metric_name,
+        value as metric_value
+    FROM {{ temp_analysis_table ~ '_stats' }}
+    CROSS JOIN LATERAL jsonb_each_text(to_jsonb({{ temp_analysis_table ~ '_stats' }}))
+)
+{% if downstream_models %}
+, impact_csv AS (
+    SELECT 
+        'Downstream Impact' as analysis_type,
+        column_name as field_name,
+        NULL as old_location,
+        NULL as old_type,
+        NULL as new_type,
+        NULL as change_type,
+        model_name,
+        source_field_name,
+        NULL as metric_name,
+        NULL as metric_value
+    FROM {{ temp_impact_table }}
+)
+{% endif %}
+SELECT *
+FROM field_analysis_csv
+UNION ALL
+SELECT *
+FROM stats_csv
+{% if downstream_models %}
+UNION ALL
+SELECT *
+FROM impact_csv
+{% endif %}
+ORDER BY analysis_type, field_name;
+{% endset %}
+
+{# Execute CSV export #}
+{% set csv_results = run_query(csv_query) %}
+{% do modules.csv.writer(open(csv_output_path, 'w')).writerows(csv_results.rows) %}
+
+{# Store results in dictionary for backward compatibility #}
+{% set results = {} %}
+{% do results.update({
+    'field_analysis': run_query('SELECT * FROM ' ~ temp_analysis_table).rows,
+    'stats_comparison': run_query('SELECT * FROM ' ~ temp_analysis_table ~ '_stats').rows,
+    'csv_output_path': csv_output_path
+}) %}
+{% if downstream_models %}
+    {% do results.update({
+        'downstream_impact': run_query('SELECT * FROM ' ~ temp_impact_table).rows
+    }) %}
+{% endif %}
+
+{# Clean up temporary tables #}
+{% do run_query('DROP TABLE IF EXISTS ' ~ temp_analysis_table) %}
+{% do run_query('DROP TABLE IF EXISTS ' ~ temp_analysis_table ~ '_stats') %}
+{% if downstream_models %}
+    {% do run_query('DROP TABLE IF EXISTS ' ~ temp_impact_table) %}
+{% endif %}
+
+{{ return(results) }}
+
+{% endmacro %}
