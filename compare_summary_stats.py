@@ -40,7 +40,18 @@ def create_comparison_macro(project_dir, model_name):
     {% do log(query, info=true) %}
     {% set results = run_query(query) %}
     {% if execute %}
-        {{ log(tojson(results.rows), info=True) }}
+        {% set results_list = [] %}
+        {% for row in results %}
+            {% do results_list.append({
+                'model_name': row[0],
+                'metric_name': row[1],
+                'dev_value': row[2],
+                'uat_value': row[3],
+                'difference': row[4],
+                'percent_change': row[5]
+            }) %}
+        {% endfor %}
+        {{ log(tojson(results_list), info=True) }}
     {% endif %}
 {% endmacro %}
 """
