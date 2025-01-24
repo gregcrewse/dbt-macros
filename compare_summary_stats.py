@@ -74,7 +74,7 @@ def run_comparison(project_dir, model_name):
         
         # Run the macro
         cmd = ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}']
-        print(f"Running command: {' '.join(cmd)}")
+        print(f"Running comparison...")
         
         result = subprocess.run(
             cmd,
@@ -83,34 +83,30 @@ def run_comparison(project_dir, model_name):
             cwd=project_dir
         )
         
-        # Print full output for debugging
-        print("\nSTDOUT:")
-        print(result.stdout)
-        print("\nSTDERR:")
-        print(result.stderr)
-        
         # Clean up
         macro_path.unlink()
         
         if result.returncode == 0:
             # Parse JSON output from log
             for line in result.stdout.split('\n'):
-                if line.strip().startswith('['):
+                if '[{' in line:  # Look for JSON array start
                     try:
-                        data = json.loads(line.strip())
+                        # Extract JSON part from the line
+                        json_str = line[line.index('['):].strip()
+                        data = json.loads(json_str)
                         df = pd.DataFrame(data)
-                        return df
+                        if not df.empty:
+                            return df
                     except json.JSONDecodeError as e:
-                        print(f"Error parsing JSON from line: {line}")
-                        print(f"Error details: {e}")
+                        print(f"Error parsing JSON: {e}")
+                        print(f"Problematic line: {line}")
                         continue
         else:
-            print(f"Command failed with return code: {result.returncode}")
+            print(f"Error running comparison:")
+            print(result.stderr)
         
     except Exception as e:
-        print(f"Error processing {model_name}: {str(e)}")
-        import traceback
-        print(traceback.format_exc())
+        print(f"Error: {str(e)}")
         if 'macro_path' in locals() and macro_path.exists():
             macro_path.unlink()
     
@@ -124,18 +120,7 @@ def main():
     project_dir = os.path.abspath(sys.argv[1])
     model_name = sys.argv[2]
     
-    print(f"Project directory: {project_dir}")
     print(f"Comparing model: {model_name}")
-    
-    # Verify project directory
-    if not os.path.exists(project_dir):
-        print(f"Error: Project directory does not exist: {project_dir}")
-        sys.exit(1)
-        
-    if not os.path.exists(os.path.join(project_dir, 'dbt_project.yml')):
-        print(f"Error: Not a dbt project directory (no dbt_project.yml found)")
-        sys.exit(1)
-    
     df = run_comparison(project_dir, model_name)
     
     if df is not None and not df.empty:
@@ -143,22 +128,20 @@ def main():
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_file = f"{model_name}_comparison_{timestamp}.csv"
         
+        # Save to CSV
         df.to_csv(output_file, index=False)
-        print(f"\nResults saved to: {output_file}")
+        print(f"Results saved to: {output_file}")
         
-        # Print summary to console
-        print("\nSummary of changes:")
-        summary = df[df['percent_change'].notnull() & (df['percent_change'] != 0)]
-        if not summary.empty:
-            for _, row in summary.iterrows():
-                print(f"\n{row['metric_name']}:")
+        # Print only significant changes
+        changes = df[df['percent_change'].astype(float).abs() > 0]
+        if not changes.empty:
+            print("\nSignificant changes found:")
+            for _, row in changes.iterrows():
+                print(f"{row['metric_name']}: {row['percent_change']}% change")
                 print(f"  DEV: {row['dev_value']}")
-                print(f"  UAT: {row['uat_value']}")
-                print(f"  Change: {row['percent_change']:.2f}%")
-        else:
-            print("No differences found between DEV and UAT")
+                print(f"  UAT: {row['uat_value']}\n")
     else:
-        print("No comparison data generated")
+        print("No comparison results generated. Please check the model name and permissions.")
 
 if __name__ == "__main__":
     main()
