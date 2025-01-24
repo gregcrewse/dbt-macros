@@ -25,14 +25,14 @@ def create_comparison_macro(project_dir, model_name):
             FROM {{ uat_schema }}.{{ model_name }}
         )
         SELECT 
-            '{{ model_name }}' as model_name,
-            'row_count' as metric_name,
-            dev_stats.row_count as dev_value,
-            uat_stats.row_count as uat_value,
-            (uat_stats.row_count - dev_stats.row_count) as difference,
+            '{{ model_name }}'::VARCHAR as model_name,
+            'row_count'::VARCHAR as metric_name,
+            dev_stats.row_count::VARCHAR as dev_value,
+            uat_stats.row_count::VARCHAR as uat_value,
+            (uat_stats.row_count - dev_stats.row_count)::VARCHAR as difference,
             CASE 
-                WHEN dev_stats.row_count = 0 THEN NULL
-                ELSE ((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)
+                WHEN dev_stats.row_count = 0 THEN NULL::VARCHAR
+                ELSE ((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)::VARCHAR
             END as percent_change
         FROM dev_stats, uat_stats
     {% endset %}
@@ -43,12 +43,12 @@ def create_comparison_macro(project_dir, model_name):
         {% set results_list = [] %}
         {% for row in results %}
             {% do results_list.append({
-                'model_name': row[0],
-                'metric_name': row[1],
-                'dev_value': row[2],
-                'uat_value': row[3],
-                'difference': row[4],
-                'percent_change': row[5]
+                'model_name': row.model_name,
+                'metric_name': row.metric_name,
+                'dev_value': row.dev_value,
+                'uat_value': row.uat_value,
+                'difference': row.difference,
+                'percent_change': row.percent_change
             }) %}
         {% endfor %}
         {{ log(tojson(results_list), info=True) }}
