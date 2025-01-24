@@ -13,88 +13,34 @@ def create_comparison_macro(project_dir, model_name):
     {% set dev_schema = 'NULL' %}
     {% set uat_schema = 'NULL' %}
     
-    {% set model_relation = ref(model_name) %}
-    {% set columns = adapter.get_columns_in_relation(model_relation) %}
-    
-    WITH dev_stats AS (
+    {% set query %}
+        WITH dev_stats AS (
+            SELECT 
+                COUNT(*) as row_count
+            FROM {{ ref(model_name) }}
+        ),
+        uat_stats AS (
+            SELECT 
+                COUNT(*) as row_count
+            FROM {{ uat_schema }}.{{ model_name }}
+        )
         SELECT 
-            COUNT(*)::BIGINT as row_count,
-            {% for column in columns %}
-                COUNT({{ column.name }})::BIGINT as non_null_{{ column.name }}_count,
-                COUNT(DISTINCT {{ column.name }})::BIGINT as distinct_{{ column.name }}_count,
-                COUNT(DISTINCT CASE WHEN {{ column.name }} IS NOT NULL THEN {{ column.name }} END)::BIGINT as distinct_non_null_{{ column.name }}_count
-                {% if not loop.last %},{% endif %}
-            {% endfor %}
-        FROM {{ model_relation }}
-    ),
-    uat_stats AS (
-        SELECT 
-            COUNT(*)::BIGINT as row_count,
-            {% for column in columns %}
-                COUNT({{ column.name }})::BIGINT as non_null_{{ column.name }}_count,
-                COUNT(DISTINCT {{ column.name }})::BIGINT as distinct_{{ column.name }}_count,
-                COUNT(DISTINCT CASE WHEN {{ column.name }} IS NOT NULL THEN {{ column.name }} END)::BIGINT as distinct_non_null_{{ column.name }}_count
-                {% if not loop.last %},{% endif %}
-            {% endfor %}
-        FROM {{ uat_schema }}.{{ model_name }}
-    )
-    SELECT 
-        '{{ model_name }}' as model_name,
-        'row_count' as metric_name,
-        dev_stats.row_count as dev_value,
-        uat_stats.row_count as uat_value,
-        (uat_stats.row_count - dev_stats.row_count) as difference,
-        CASE 
-            WHEN dev_stats.row_count = 0 THEN NULL
-            ELSE ((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)
-        END as percent_change
-    FROM dev_stats, uat_stats
+            '{{ model_name }}' as model_name,
+            'row_count' as metric_name,
+            dev_stats.row_count as dev_value,
+            uat_stats.row_count as uat_value,
+            (uat_stats.row_count - dev_stats.row_count) as difference,
+            CASE 
+                WHEN dev_stats.row_count = 0 THEN NULL
+                ELSE ((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)
+            END as percent_change
+        FROM dev_stats, uat_stats
+    {% endset %}
 
-    {% for column in columns %}
-        UNION ALL
-        SELECT 
-            '{{ model_name }}' as model_name,
-            'non_null_{{ column.name }}' as metric_name,
-            dev_stats.non_null_{{ column.name }}_count as dev_value,
-            uat_stats.non_null_{{ column.name }}_count as uat_value,
-            (uat_stats.non_null_{{ column.name }}_count - dev_stats.non_null_{{ column.name }}_count) as difference,
-            CASE 
-                WHEN dev_stats.non_null_{{ column.name }}_count = 0 THEN NULL
-                ELSE ((uat_stats.non_null_{{ column.name }}_count::FLOAT - dev_stats.non_null_{{ column.name }}_count) 
-                      / dev_stats.non_null_{{ column.name }}_count * 100)
-            END as percent_change
-        FROM dev_stats, uat_stats
-        
-        UNION ALL
-        SELECT 
-            '{{ model_name }}' as model_name,
-            'distinct_{{ column.name }}' as metric_name,
-            dev_stats.distinct_{{ column.name }}_count as dev_value,
-            uat_stats.distinct_{{ column.name }}_count as uat_value,
-            (uat_stats.distinct_{{ column.name }}_count - dev_stats.distinct_{{ column.name }}_count) as difference,
-            CASE 
-                WHEN dev_stats.distinct_{{ column.name }}_count = 0 THEN NULL
-                ELSE ((uat_stats.distinct_{{ column.name }}_count::FLOAT - dev_stats.distinct_{{ column.name }}_count) 
-                      / dev_stats.distinct_{{ column.name }}_count * 100)
-            END as percent_change
-        FROM dev_stats, uat_stats
-
-        UNION ALL
-        SELECT 
-            '{{ model_name }}' as model_name,
-            'distinct_non_null_{{ column.name }}' as metric_name,
-            dev_stats.distinct_non_null_{{ column.name }}_count as dev_value,
-            uat_stats.distinct_non_null_{{ column.name }}_count as uat_value,
-            (uat_stats.distinct_non_null_{{ column.name }}_count - dev_stats.distinct_non_null_{{ column.name }}_count) as difference,
-            CASE 
-                WHEN dev_stats.distinct_non_null_{{ column.name }}_count = 0 THEN NULL
-                ELSE ((uat_stats.distinct_non_null_{{ column.name }}_count::FLOAT - dev_stats.distinct_non_null_{{ column.name }}_count) 
-                      / dev_stats.distinct_non_null_{{ column.name }}_count * 100)
-            END as percent_change
-        FROM dev_stats, uat_stats
-    {% endfor %}
+    {% do log(query, info=true) %}
+    {% set results = run_query(query) %}
     {% if execute %}
-        {{ log(tojson(run_query(_dbt_generic_test_sql).rows), info=True) }}
+        {{ log(tojson(results.rows), info=True) }}
     {% endif %}
 {% endmacro %}
 """
@@ -113,14 +59,24 @@ def run_comparison(project_dir, model_name):
     try:
         # Create and write the macro
         macro_path = create_comparison_macro(project_dir, model_name)
+        print(f"Created macro at: {macro_path}")
         
         # Run the macro
+        cmd = ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}']
+        print(f"Running command: {' '.join(cmd)}")
+        
         result = subprocess.run(
-            ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}'],
+            cmd,
             capture_output=True,
             text=True,
             cwd=project_dir
         )
+        
+        # Print full output for debugging
+        print("\nSTDOUT:")
+        print(result.stdout)
+        print("\nSTDERR:")
+        print(result.stderr)
         
         # Clean up
         macro_path.unlink()
@@ -133,15 +89,18 @@ def run_comparison(project_dir, model_name):
                         data = json.loads(line.strip())
                         df = pd.DataFrame(data)
                         return df
-                    except json.JSONDecodeError:
+                    except json.JSONDecodeError as e:
+                        print(f"Error parsing JSON from line: {line}")
+                        print(f"Error details: {e}")
                         continue
         else:
-            print(f"Error comparing model {model_name}:")
-            print(result.stderr)
+            print(f"Command failed with return code: {result.returncode}")
         
     except Exception as e:
-        print(f"Error processing {model_name}: {e}")
-        if macro_path.exists():
+        print(f"Error processing {model_name}: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        if 'macro_path' in locals() and macro_path.exists():
             macro_path.unlink()
     
     return None
@@ -154,7 +113,18 @@ def main():
     project_dir = os.path.abspath(sys.argv[1])
     model_name = sys.argv[2]
     
+    print(f"Project directory: {project_dir}")
     print(f"Comparing model: {model_name}")
+    
+    # Verify project directory
+    if not os.path.exists(project_dir):
+        print(f"Error: Project directory does not exist: {project_dir}")
+        sys.exit(1)
+        
+    if not os.path.exists(os.path.join(project_dir, 'dbt_project.yml')):
+        print(f"Error: Not a dbt project directory (no dbt_project.yml found)")
+        sys.exit(1)
+    
     df = run_comparison(project_dir, model_name)
     
     if df is not None and not df.empty:
