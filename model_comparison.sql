@@ -30,11 +30,37 @@
     {# Create maps of column names to data types #}
     {% set dev_col_map = {} %}
     {% set uat_col_map = {} %}
+    
+    {{ log("DEV columns:", info=True) }}
     {% for col in dev_columns %}
         {% do dev_col_map.update({col.name: col.dtype}) %}
+        {{ log("  - " ~ col.name ~ " (" ~ col.dtype ~ ")", info=True) }}
     {% endfor %}
+    
+    {{ log("UAT columns:", info=True) }}
     {% for col in uat_columns %}
         {% do uat_col_map.update({col.name: col.dtype}) %}
+        {{ log("  - " ~ col.name ~ " (" ~ col.dtype ~ ")", info=True) }}
+    {% endfor %}
+    
+    {# Find added and removed columns #}
+    {% set added_columns = [] %}
+    {% set removed_columns = [] %}
+    
+    {{ log("Checking for added columns...", info=True) }}
+    {% for col in uat_col_map %}
+        {% if col not in dev_col_map %}
+            {% do added_columns.append(col) %}
+            {{ log("  + Added: " ~ col, info=True) }}
+        {% endif %}
+    {% endfor %}
+    
+    {{ log("Checking for removed columns...", info=True) }}
+    {% for col in dev_col_map %}
+        {% if col not in uat_col_map %}
+            {% do removed_columns.append(col) %}
+            {{ log("  - Removed: " ~ col, info=True) }}
+        {% endif %}
     {% endfor %}
     
     {# Generate column statistics query #}
@@ -76,20 +102,6 @@
         {{ log("Executing query...", info=True) }}
         {% set results = run_query(stats_query) %}
         {% set stats_row = results.rows[0] %}
-        
-        {# Find added and removed columns #}
-        {% set added_columns = [] %}
-        {% set removed_columns = [] %}
-        {% for col in uat_col_map %}
-            {% if col not in dev_col_map %}
-                {% do added_columns.append(col) %}
-            {% endif %}
-        {% endfor %}
-        {% for col in dev_col_map %}
-            {% if col not in uat_col_map %}
-                {% do removed_columns.append(col) %}
-            {% endif %}
-        {% endfor %}
         
         {% set comparison_data = {
             'model_name': model_name,
