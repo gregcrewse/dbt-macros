@@ -1,3 +1,4 @@
+{# macros/model_comparison.sql #}
 {% macro compare_models(model_name) %}
     {{ log("Starting comparison for model: " ~ model_name, info=True) }}
     
@@ -5,9 +6,21 @@
     {% set uat_schema = 'NULL' %}
     
     {# Get columns from both environments #}
+    {{ log("Getting DEV columns...", info=True) }}
     {% set dev_columns = adapter.get_columns_in_relation(ref(model_name)) %}
+    {{ log("Found " ~ dev_columns|length ~ " columns in DEV", info=True) }}
+    
+    {{ log("Getting UAT relation...", info=True) }}
     {% set uat_relation = adapter.get_relation(database=none, schema=uat_schema, identifier=model_name) %}
+    
+    {% if uat_relation is none %}
+        {{ log("ERROR: Could not find model in UAT schema", info=True) }}
+        {{ return(none) }}
+    {% endif %}
+    
+    {{ log("Getting UAT columns...", info=True) }}
     {% set uat_columns = adapter.get_columns_in_relation(uat_relation) %}
+    {{ log("Found " ~ uat_columns|length ~ " columns in UAT", info=True) }}
     
     {# Create maps of column names to data types #}
     {% set dev_col_map = {} %}
@@ -38,6 +51,7 @@
     {% endfor %}
     
     {# Generate column statistics query #}
+    {{ log("Generating statistics query...", info=True) }}
     {% set stats_query %}
         WITH dev_stats AS (
             SELECT 
@@ -73,11 +87,14 @@
         FROM dev_stats, uat_stats
     {% endset %}
 
-    {{ log("Running statistics query...", info=True) }}
+    {{ log("Running query:", info=True) }}
+    {{ log(stats_query, info=True) }}
     
     {% if execute %}
+        {{ log("Executing query...", info=True) }}
         {% set results = run_query(stats_query) %}
         {% set stats_row = results.rows[0] %}
+        {{ log("Query executed successfully", info=True) }}
         
         {# Process results into comparison data #}
         {% set comparison_data = {
@@ -95,6 +112,7 @@
         } %}
         
         {# Add column-level statistics #}
+        {{ log("Processing column statistics...", info=True) }}
         {% for column in dev_columns %}
             {% if column.name in uat_col_map %}
                 {% set dev_non_null = stats_row['dev_non_null_' ~ column.name]|int %}
