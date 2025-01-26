@@ -97,29 +97,30 @@ def run_comparison(project_dir, model_name):
         
         if result.returncode == 0:
             results_data = None
-            in_results = False
-            json_line = None
             
             for line in result.stdout.split('\n'):
                 print(f"Processing line: {line}")
-                if "RESULTS_START" in line:
-                    in_results = True
-                elif "RESULTS_END" in line:
-                    in_results = False
-                elif in_results and "{" in line:
-                    # Extract the JSON part of the line
+                if "=" in line:
                     try:
-                        # Find the start of the JSON object
-                        json_start = line.find('{')
-                        json_line = line[json_start:]
-                        print(f"Attempting to parse JSON: {json_line}")
-                        results_data = json.loads(json_line)
+                        # Extract between = signs
+                        json_str = line.split('=')[1].strip()
+                        print(f"Extracted JSON string: {json_str}")
+                        
+                        # Try to parse the JSON
+                        results_data = json.loads(json_str)
                         print(f"Successfully parsed JSON data: {results_data}")
+                        
+                        # Create DataFrame
                         df = pd.DataFrame([results_data])
+                        
+                        # Convert percent_change to numeric
+                        if 'percent_change' in df.columns:
+                            df['percent_change'] = pd.to_numeric(df['percent_change'], errors='coerce')
+                        
                         return df
                     except json.JSONDecodeError as e:
                         print(f"JSON parsing error: {e}")
-                        print(f"Problematic line: {json_line}")
+                        print(f"Attempted to parse: {json_str}")
                     except Exception as e:
                         print(f"Error processing line: {e}")
                         print(f"Line content: {line}")
