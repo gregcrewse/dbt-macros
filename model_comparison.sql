@@ -30,36 +30,24 @@
     {# Generate column statistics query #}
     {% set stats_query %}
         WITH dev_stats AS (
-            SELECT 
-                COUNT(*) as total_rows,
-                {% for column in dev_columns %}
-                    COUNT({{ column.name }}) as non_null_{{ column.name }},
-                    COUNT(DISTINCT {{ column.name }}) as unique_{{ column.name }}
-                    {% if not loop.last %},{% endif %}
-                {% endfor %}
+            SELECT COUNT(*) as total_rows
+            {% for column in dev_columns %}
+            , COUNT({{ column.name }}) as non_null_{{ column.name }}
+            , COUNT(DISTINCT {{ column.name }}) as unique_{{ column.name }}
+            {% endfor %}
             FROM {{ ref(model_name) }}
         ),
         uat_stats AS (
-            SELECT 
-                COUNT(*) as total_rows,
-                {% for column in uat_columns %}
-                    COUNT({{ column.name }}) as non_null_{{ column.name }},
-                    COUNT(DISTINCT {{ column.name }}) as unique_{{ column.name }}
-                    {% if not loop.last %},{% endif %}
-                {% endfor %}
+            SELECT COUNT(*) as total_rows
+            {% for column in uat_columns %}
+            , COUNT({{ column.name }}) as non_null_{{ column.name }}
+            , COUNT(DISTINCT {{ column.name }}) as unique_{{ column.name }}
+            {% endfor %}
             FROM {{ database }}.{{ uat_schema }}.{{ model_name }}
         )
         SELECT 
             dev_stats.total_rows::VARCHAR as dev_total_rows,
             uat_stats.total_rows::VARCHAR as uat_total_rows
-            {% for column in dev_columns %}
-                {% if column.name in uat_col_map %}
-                    ,dev_stats.non_null_{{ column.name }}::VARCHAR as dev_non_null_{{ column.name }}
-                    ,uat_stats.non_null_{{ column.name }}::VARCHAR as uat_non_null_{{ column.name }}
-                    ,dev_stats.unique_{{ column.name }}::VARCHAR as dev_unique_{{ column.name }}
-                    ,uat_stats.unique_{{ column.name }}::VARCHAR as uat_unique_{{ column.name }}
-                {% endif %}
-            {% endfor %}
         FROM dev_stats, uat_stats
     {% endset %}
 
