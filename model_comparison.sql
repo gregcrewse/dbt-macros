@@ -49,6 +49,20 @@
             {% endfor %}
         {% endif %}
     {% endfor %}
+
+    {# Find added and removed columns #}
+    {% set added_columns = [] %}
+    {% set removed_columns = [] %}
+    {% for col in uat_col_map %}
+        {% if col not in dev_col_map %}
+            {% do added_columns.append(col) %}
+        {% endif %}
+    {% endfor %}
+    {% for col in dev_col_map %}
+        {% if col not in uat_col_map %}
+            {% do removed_columns.append(col) %}
+        {% endif %}
+    {% endfor %}
     
     {# Generate column statistics query #}
     {{ log("Generating statistics query...", info=True) }}
@@ -107,8 +121,8 @@
             },
             'columns': {},
             'renamed_columns': renamed_columns,
-            'added_columns': [col for col in uat_col_map if col not in dev_col_map],
-            'removed_columns': [col for col in dev_col_map if col not in uat_col_map]
+            'added_columns': added_columns,
+            'removed_columns': removed_columns
         } %}
         
         {# Add column-level statistics #}
