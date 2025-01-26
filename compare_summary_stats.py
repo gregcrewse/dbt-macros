@@ -32,26 +32,27 @@ def create_comparison_macro(project_dir, model_name):
             (uat_stats.row_count - dev_stats.row_count)::VARCHAR as difference,
             CASE 
                 WHEN dev_stats.row_count = 0 THEN NULL::VARCHAR
-                ELSE ((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)::VARCHAR
+                ELSE ROUND(((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)::NUMERIC, 2)::VARCHAR
             END as percent_change
         FROM dev_stats, uat_stats
     {% endset %}
 
-    {% do log(query, info=true) %}
-    {% set results = run_query(query) %}
     {% if execute %}
+        {% set results = run_query(query) %}
         {% set results_list = [] %}
         {% for row in results %}
             {% do results_list.append({
-                'model_name': row.model_name,
-                'metric_name': row.metric_name,
-                'dev_value': row.dev_value,
-                'uat_value': row.uat_value,
-                'difference': row.difference,
-                'percent_change': row.percent_change
+                "model_name": model_name,
+                "metric_name": "row_count",
+                "dev_value": row.dev_value,
+                "uat_value": row.uat_value,
+                "difference": row.difference,
+                "percent_change": row.percent_change
             }) %}
         {% endfor %}
+        {{ log("COMPARISON_RESULTS_START", info=True) }}
         {{ log(tojson(results_list), info=True) }}
+        {{ log("COMPARISON_RESULTS_END", info=True) }}
     {% endif %}
 {% endmacro %}
 """
@@ -70,12 +71,10 @@ def run_comparison(project_dir, model_name):
     try:
         # Create and write the macro
         macro_path = create_comparison_macro(project_dir, model_name)
-        print(f"Created macro at: {macro_path}")
+        print(f"Running comparison...")
         
         # Run the macro
         cmd = ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}']
-        print(f"Running comparison...")
-        
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -87,20 +86,29 @@ def run_comparison(project_dir, model_name):
         macro_path.unlink()
         
         if result.returncode == 0:
-            # Parse JSON output from log
-            for line in result.stdout.split('\n'):
-                if '[{' in line:  # Look for JSON array start
-                    try:
-                        # Extract JSON part from the line
-                        json_str = line[line.index('['):].strip()
-                        data = json.loads(json_str)
-                        df = pd.DataFrame(data)
-                        if not df.empty:
-                            return df
-                    except json.JSONDecodeError as e:
-                        print(f"Error parsing JSON: {e}")
-                        print(f"Problematic line: {line}")
-                        continue
+            # Look for results between markers
+            lines = result.stdout.split('\n')
+            start_idx = None
+            end_idx = None
+            
+            for i, line in enumerate(lines):
+                if 'COMPARISON_RESULTS_START' in line:
+                    start_idx = i + 1
+                elif 'COMPARISON_RESULTS_END' in line:
+                    end_idx = i
+                    break
+            
+            if start_idx is not None and end_idx is not None:
+                json_str = lines[start_idx].strip()
+                try:
+                    data = json.loads(json_str)
+                    df = pd.DataFrame(data)
+                    return df
+                except json.JSONDecodeError as e:
+                    print(f"Error parsing JSON: {str(e)}")
+                    print(f"JSON string: {json_str}")
+            else:
+                print("Could not find comparison results in output")
         else:
             print(f"Error running comparison:")
             print(result.stderr)
