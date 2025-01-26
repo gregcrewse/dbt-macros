@@ -8,7 +8,7 @@ from datetime import datetime
 
 def create_comparison_macro(project_dir, model_name):
     """Create the comparison macro file"""
-    macro_content = """
+    macro_content = '''
 {% macro compare_models(model_name) %}
     {% set dev_schema = 'NULL' %}
     {% set uat_schema = 'NULL' %}
@@ -31,7 +31,7 @@ def create_comparison_macro(project_dir, model_name):
             uat_stats.row_count::VARCHAR as uat_value,
             (uat_stats.row_count - dev_stats.row_count)::VARCHAR as difference,
             CASE 
-                WHEN dev_stats.row_count = 0 THEN NULL::VARCHAR
+                WHEN dev_stats.row_count = 0 THEN '0'
                 ELSE ROUND(((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)::NUMERIC, 2)::VARCHAR
             END as percent_change
         FROM dev_stats, uat_stats
@@ -39,23 +39,18 @@ def create_comparison_macro(project_dir, model_name):
 
     {% if execute %}
         {% set results = run_query(query) %}
-        {% set results_list = [] %}
-        {% for row in results %}
-            {% do results_list.append({
-                "model_name": model_name,
-                "metric_name": "row_count",
-                "dev_value": row.dev_value,
-                "uat_value": row.uat_value,
-                "difference": row.difference,
-                "percent_change": row.percent_change
-            }) %}
-        {% endfor %}
-        {{ log("COMPARISON_RESULTS_START", info=True) }}
-        {{ log(tojson(results_list), info=True) }}
-        {{ log("COMPARISON_RESULTS_END", info=True) }}
+        {% set results_dict = {
+            "model_name": model_name,
+            "metric_name": "row_count",
+            "dev_value": results.columns[2].values[0],
+            "uat_value": results.columns[3].values[0],
+            "difference": results.columns[4].values[0],
+            "percent_change": results.columns[5].values[0]
+        } %}
+        {{ log(tojson([results_dict]), info=True) }}
     {% endif %}
 {% endmacro %}
-"""
+'''
     
     macro_dir = Path(project_dir) / 'macros'
     macro_dir.mkdir(exist_ok=True)
@@ -86,29 +81,24 @@ def run_comparison(project_dir, model_name):
         macro_path.unlink()
         
         if result.returncode == 0:
-            # Look for results between markers
-            lines = result.stdout.split('\n')
-            start_idx = None
-            end_idx = None
-            
-            for i, line in enumerate(lines):
-                if 'COMPARISON_RESULTS_START' in line:
-                    start_idx = i + 1
-                elif 'COMPARISON_RESULTS_END' in line:
-                    end_idx = i
-                    break
-            
-            if start_idx is not None and end_idx is not None:
-                json_str = lines[start_idx].strip()
-                try:
-                    data = json.loads(json_str)
-                    df = pd.DataFrame(data)
-                    return df
-                except json.JSONDecodeError as e:
-                    print(f"Error parsing JSON: {str(e)}")
-                    print(f"JSON string: {json_str}")
-            else:
-                print("Could not find comparison results in output")
+            for line in result.stdout.split('\n'):
+                if '[{' in line:
+                    try:
+                        # Extract just the JSON array part
+                        json_start = line.find('[{')
+                        json_str = line[json_start:].strip()
+                        # Clean up common issues
+                        json_str = json_str.replace('": "', '": "')  # Fix double quotes
+                        json_str = json_str.replace('""', '"')       # Fix doubled quotes
+                        data = json.loads(json_str)
+                        df = pd.DataFrame(data)
+                        if not df.empty:
+                            return df
+                    except json.JSONDecodeError as e:
+                        print(f"Error parsing JSON: {str(e)}")
+                        print(f"Raw line: {line}")
+                        print(f"Cleaned JSON string: {json_str}")
+                        continue
         else:
             print(f"Error running comparison:")
             print(result.stderr)
