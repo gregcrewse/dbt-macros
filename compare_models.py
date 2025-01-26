@@ -7,12 +7,62 @@ import sys
 import os
 from datetime import datetime
 
-def create_comparison_macro(project_dir, model_name):
-    """Create the comparison macro file"""
-    # The macro content should be copied from the previous file
-    # and saved to macros/model_comparison.sql
-    macro_path = Path(project_dir) / 'macros' / 'model_comparison.sql'
-    return macro_path
+def run_comparison(project_dir, model_name):
+    """Run the comparison macro and return results as a DataFrame"""
+    try:
+        # Run the macro
+        cmd = ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}']
+        print(f"Running command: {' '.join(cmd)}")
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            cwd=project_dir
+        )
+        
+        # Print full output for debugging
+        print("\nCommand Output:")
+        print("-" * 50)
+        print(result.stdout)
+        print("-" * 50)
+        print("\nError Output:")
+        print("-" * 50)
+        print(result.stderr)
+        print("-" * 50)
+        
+        if result.returncode == 0:
+            results_data = None
+            in_results = False
+            
+            for line in result.stdout.split('\n'):
+                print(f"Processing line: {line}")
+                if "=" in line:
+                    try:
+                        # Extract between = signs
+                        json_str = line.split('=')[1].strip()
+                        print(f"Extracted JSON: {json_str}")
+                        results_data = json.loads(json_str)
+                        print(f"Successfully parsed JSON data: {results_data}")
+                        records = format_comparison_results(results_data)
+                        return pd.DataFrame(records)
+                    except json.JSONDecodeError as e:
+                        print(f"JSON parsing error: {str(e)}")
+                        print(f"Attempted to parse: {json_str}")
+                    except Exception as e:
+                        print(f"Error processing line: {e}")
+                        print(f"Line content: {line}")
+        else:
+            print(f"Command failed with return code: {result.returncode}")
+            print("Error output:")
+            print(result.stderr)
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+    
+    return None
 
 def format_comparison_results(data):
     """Format the comparison data into a list of records for DataFrame creation"""
@@ -91,51 +141,6 @@ def format_comparison_results(data):
     
     return records
 
-def run_comparison(project_dir, model_name):
-    """Run the comparison macro and return results as a DataFrame"""
-    try:
-        # Create and write the macro
-        macro_path = create_comparison_macro(project_dir, model_name)
-        print(f"Using macro file at: {macro_path}")
-        
-        # Run the macro
-        cmd = ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}']
-        print(f"Running comparison...")
-        
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            cwd=project_dir
-        )
-        
-        if result.returncode == 0:
-            # Look for results between markers
-            in_results = False
-            json_data = None
-            
-            for line in result.stdout.split('\n'):
-                if "=" in line:
-                    try:
-                        # Extract between = signs
-                        json_str = line.split('=')[1].strip()
-                        data = json.loads(json_str)
-                        records = format_comparison_results(data)
-                        return pd.DataFrame(records)
-                    except json.JSONDecodeError as e:
-                        print(f"Error parsing JSON: {str(e)}")
-                        print(f"Attempted to parse: {json_str}")
-                    except Exception as e:
-                        print(f"Error processing results: {str(e)}")
-        else:
-            print(f"Error running comparison:")
-            print(result.stderr)
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
-    
-    return None
-
 def print_comparison_summary(df):
     """Print a readable summary of the comparison results"""
     print("\nComparison Summary:")
@@ -201,6 +206,8 @@ def main():
         sys.exit(1)
     
     print(f"Comparing model: {model_name}")
+    print(f"Project directory: {project_dir}")
+    
     df = run_comparison(project_dir, model_name)
     
     if df is not None and not df.empty:
@@ -219,3 +226,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
