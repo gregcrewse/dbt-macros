@@ -53,7 +53,7 @@ def create_comparison_macro(project_dir, model_name):
             "percent_change": row[5]|string
         } %}
         {{ log("RESULTS_START", info=True) }}
-        {{ log(tojson(output), info=True) }}
+        {{ log("=" ~ tojson(output) ~ "=", info=True) }}
         {{ log("RESULTS_END", info=True) }}
     {% endif %}
 {% endmacro %}
@@ -98,25 +98,31 @@ def run_comparison(project_dir, model_name):
         if result.returncode == 0:
             results_data = None
             in_results = False
+            json_line = None
             
             for line in result.stdout.split('\n'):
                 print(f"Processing line: {line}")
                 if "RESULTS_START" in line:
                     in_results = True
-                    continue
                 elif "RESULTS_END" in line:
                     in_results = False
-                elif in_results:
+                elif in_results and "{" in line:
+                    # Extract the JSON part of the line
                     try:
-                        results_data = json.loads(line.split(']')[-1].strip())
-                        print(f"Parsed JSON data: {results_data}")
+                        # Find the start of the JSON object
+                        json_start = line.find('{')
+                        json_line = line[json_start:]
+                        print(f"Attempting to parse JSON: {json_line}")
+                        results_data = json.loads(json_line)
+                        print(f"Successfully parsed JSON data: {results_data}")
                         df = pd.DataFrame([results_data])
                         return df
                     except json.JSONDecodeError as e:
                         print(f"JSON parsing error: {e}")
-                        print(f"Problematic line: {line}")
+                        print(f"Problematic line: {json_line}")
                     except Exception as e:
                         print(f"Error processing line: {e}")
+                        print(f"Line content: {line}")
         else:
             print(f"Command failed with return code: {result.returncode}")
             print("Error output:")
