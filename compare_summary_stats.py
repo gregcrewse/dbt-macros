@@ -10,6 +10,8 @@ def create_comparison_macro(project_dir, model_name):
     """Create the comparison macro file"""
     macro_content = '''
 {% macro compare_models(model_name) %}
+    {{ log("Starting comparison for model: " ~ model_name, info=True) }}
+    
     {% set dev_schema = 'NULL' %}
     {% set uat_schema = 'NULL' %}
     
@@ -25,29 +27,34 @@ def create_comparison_macro(project_dir, model_name):
             FROM {{ uat_schema }}.{{ model_name }}
         )
         SELECT 
-            '{{ model_name }}'::VARCHAR as model_name,
-            'row_count'::VARCHAR as metric_name,
-            dev_stats.row_count::VARCHAR as dev_value,
-            uat_stats.row_count::VARCHAR as uat_value,
-            (uat_stats.row_count - dev_stats.row_count)::VARCHAR as difference,
+            '{{ model_name }}' as model_name,
+            'row_count' as metric_name,
+            dev_stats.row_count as dev_value,
+            uat_stats.row_count as uat_value,
+            (uat_stats.row_count - dev_stats.row_count) as difference,
             CASE 
-                WHEN dev_stats.row_count = 0 THEN '0'
-                ELSE ROUND(((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100)::NUMERIC, 2)::VARCHAR
+                WHEN dev_stats.row_count = 0 THEN 0
+                ELSE ROUND(((uat_stats.row_count::FLOAT - dev_stats.row_count) / dev_stats.row_count * 100), 2)
             END as percent_change
         FROM dev_stats, uat_stats
     {% endset %}
 
+    {{ log("Running query...", info=True) }}
+    
     {% if execute %}
         {% set results = run_query(query) %}
-        {% set results_dict = {
-            "model_name": model_name,
-            "metric_name": "row_count",
-            "dev_value": results.columns[2].values[0],
-            "uat_value": results.columns[3].values[0],
-            "difference": results.columns[4].values[0],
-            "percent_change": results.columns[5].values[0]
+        {% set row = results.rows[0] %}
+        {% set output = {
+            "model_name": row[0],
+            "metric_name": row[1],
+            "dev_value": row[2],
+            "uat_value": row[3],
+            "difference": row[4],
+            "percent_change": row[5]
         } %}
-        {{ log(tojson([results_dict]), info=True) }}
+        {{ log("RESULTS_START", info=True) }}
+        {{ log(tojson(output), info=True) }}
+        {{ log("RESULTS_END", info=True) }}
     {% endif %}
 {% endmacro %}
 '''
@@ -66,10 +73,12 @@ def run_comparison(project_dir, model_name):
     try:
         # Create and write the macro
         macro_path = create_comparison_macro(project_dir, model_name)
-        print(f"Running comparison...")
+        print(f"Created macro file at: {macro_path}")
         
         # Run the macro
         cmd = ['dbt', 'run-operation', 'compare_models', '--args', f'{{"model_name": "{model_name}"}}']
+        print(f"Running command: {' '.join(cmd)}")
+        
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -80,27 +89,37 @@ def run_comparison(project_dir, model_name):
         # Clean up
         macro_path.unlink()
         
+        # Print full output for debugging
+        print("\nCommand Output:")
+        print("-" * 50)
+        print(result.stdout)
+        print("-" * 50)
+        
         if result.returncode == 0:
+            results_data = None
+            in_results = False
+            
             for line in result.stdout.split('\n'):
-                if '[{' in line:
+                print(f"Processing line: {line}")
+                if "RESULTS_START" in line:
+                    in_results = True
+                    continue
+                elif "RESULTS_END" in line:
+                    in_results = False
+                elif in_results:
                     try:
-                        # Extract just the JSON array part
-                        json_start = line.find('[{')
-                        json_str = line[json_start:].strip()
-                        # Clean up common issues
-                        json_str = json_str.replace('": "', '": "')  # Fix double quotes
-                        json_str = json_str.replace('""', '"')       # Fix doubled quotes
-                        data = json.loads(json_str)
-                        df = pd.DataFrame(data)
-                        if not df.empty:
-                            return df
+                        results_data = json.loads(line.split(']')[-1].strip())
+                        print(f"Parsed JSON data: {results_data}")
+                        df = pd.DataFrame([results_data])
+                        return df
                     except json.JSONDecodeError as e:
-                        print(f"Error parsing JSON: {str(e)}")
-                        print(f"Raw line: {line}")
-                        print(f"Cleaned JSON string: {json_str}")
-                        continue
+                        print(f"JSON parsing error: {e}")
+                        print(f"Problematic line: {line}")
+                    except Exception as e:
+                        print(f"Error processing line: {e}")
         else:
-            print(f"Error running comparison:")
+            print(f"Command failed with return code: {result.returncode}")
+            print("Error output:")
             print(result.stderr)
         
     except Exception as e:
@@ -118,7 +137,18 @@ def main():
     project_dir = os.path.abspath(sys.argv[1])
     model_name = sys.argv[2]
     
+    # Verify project directory
+    if not os.path.exists(project_dir):
+        print(f"Error: Project directory does not exist: {project_dir}")
+        sys.exit(1)
+    
+    if not os.path.exists(os.path.join(project_dir, 'dbt_project.yml')):
+        print(f"Error: Not a dbt project directory (no dbt_project.yml found)")
+        sys.exit(1)
+    
     print(f"Comparing model: {model_name}")
+    print(f"Project directory: {project_dir}")
+    
     df = run_comparison(project_dir, model_name)
     
     if df is not None and not df.empty:
@@ -126,18 +156,15 @@ def main():
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         output_file = f"{model_name}_comparison_{timestamp}.csv"
         
-        # Save to CSV
         df.to_csv(output_file, index=False)
-        print(f"Results saved to: {output_file}")
+        print(f"\nResults saved to: {output_file}")
         
-        # Print only significant changes
-        changes = df[df['percent_change'].astype(float).abs() > 0]
-        if not changes.empty:
-            print("\nSignificant changes found:")
-            for _, row in changes.iterrows():
-                print(f"{row['metric_name']}: {row['percent_change']}% change")
-                print(f"  DEV: {row['dev_value']}")
-                print(f"  UAT: {row['uat_value']}\n")
+        # Print summary
+        print("\nComparison Summary:")
+        print(f"DEV rows: {df['dev_value'].iloc[0]}")
+        print(f"UAT rows: {df['uat_value'].iloc[0]}")
+        print(f"Difference: {df['difference'].iloc[0]}")
+        print(f"Percent Change: {df['percent_change'].iloc[0]}%")
     else:
         print("No comparison results generated. Please check the model name and permissions.")
 
