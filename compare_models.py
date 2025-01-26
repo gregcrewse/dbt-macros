@@ -22,76 +22,92 @@ def run_comparison(project_dir, model_name):
         )
         
         if result.returncode == 0:
+            json_data = None
             for line in result.stdout.split('\n'):
                 if "=" in line:
                     try:
-                        json_str = line.split('=')[1].strip()
-                        results_data = json.loads(json_str)
+                        # Find everything between = signs
+                        parts = line.split("=")
+                        if len(parts) >= 3:  # If we have at least two = signs
+                            json_str = "=".join(parts[1:-1])  # Join everything between first and last =
+                        else:
+                            json_str = parts[1]  # Just take what's after the first =
                         
-                        records = []
+                        json_str = json_str.strip()
+                        print(f"Attempting to parse JSON: {json_str}")
                         
-                        # Add total rows comparison
-                        records.append({
-                            'comparison_type': 'total_rows',
-                            'column_name': 'N/A',
-                            'metric': 'row_count',
-                            'dev_value': results_data['total_rows']['dev_value'],
-                            'uat_value': results_data['total_rows']['uat_value'],
-                            'difference': results_data['total_rows']['difference'],
-                            'percent_change': results_data['total_rows']['percent_change']
-                        })
-                        
-                        # Add column-level comparisons
-                        for col_name, col_data in results_data['columns'].items():
-                            # Non-null values comparison
+                        json_data = json.loads(json_str)
+                        if json_data:
+                            records = []
+                            
+                            # Add total rows comparison
                             records.append({
-                                'comparison_type': 'column_stats',
-                                'column_name': col_name,
-                                'metric': 'non_null_count',
-                                'dev_value': col_data['non_null_values']['dev_value'],
-                                'uat_value': col_data['non_null_values']['uat_value'],
-                                'difference': col_data['non_null_values']['difference'],
-                                'percent_change': col_data['non_null_values']['percent_change']
+                                'comparison_type': 'total_rows',
+                                'column_name': 'N/A',
+                                'metric': 'row_count',
+                                'dev_value': json_data['total_rows']['dev_value'],
+                                'uat_value': json_data['total_rows']['uat_value'],
+                                'difference': json_data['total_rows']['difference'],
+                                'percent_change': json_data['total_rows']['percent_change']
                             })
                             
-                            # Unique values comparison
-                            records.append({
-                                'comparison_type': 'column_stats',
-                                'column_name': col_name,
-                                'metric': 'unique_count',
-                                'dev_value': col_data['unique_values']['dev_value'],
-                                'uat_value': col_data['unique_values']['uat_value'],
-                                'difference': col_data['unique_values']['difference'],
-                                'percent_change': col_data['unique_values']['percent_change']
-                            })
-                        
-                        # Add schema changes
-                        for col in results_data.get('added_columns', []):
-                            records.append({
-                                'comparison_type': 'schema_change',
-                                'column_name': col,
-                                'metric': 'added_column',
-                                'dev_value': 'N/A',
-                                'uat_value': col,
-                                'difference': 'N/A',
-                                'percent_change': None
-                            })
-                        
-                        for col in results_data.get('removed_columns', []):
-                            records.append({
-                                'comparison_type': 'schema_change',
-                                'column_name': col,
-                                'metric': 'removed_column',
-                                'dev_value': col,
-                                'uat_value': 'N/A',
-                                'difference': 'N/A',
-                                'percent_change': None
-                            })
-                        
-                        return pd.DataFrame(records)
+                            # Add column-level comparisons
+                            for col_name, col_data in json_data.get('columns', {}).items():
+                                # Non-null values comparison
+                                records.append({
+                                    'comparison_type': 'column_stats',
+                                    'column_name': col_name,
+                                    'metric': 'non_null_count',
+                                    'dev_value': col_data['non_null_values']['dev_value'],
+                                    'uat_value': col_data['non_null_values']['uat_value'],
+                                    'difference': col_data['non_null_values']['difference'],
+                                    'percent_change': col_data['non_null_values']['percent_change']
+                                })
+                                
+                                # Unique values comparison
+                                records.append({
+                                    'comparison_type': 'column_stats',
+                                    'column_name': col_name,
+                                    'metric': 'unique_count',
+                                    'dev_value': col_data['unique_values']['dev_value'],
+                                    'uat_value': col_data['unique_values']['uat_value'],
+                                    'difference': col_data['unique_values']['difference'],
+                                    'percent_change': col_data['unique_values']['percent_change']
+                                })
+                            
+                            # Add schema changes
+                            for col in json_data.get('added_columns', []):
+                                records.append({
+                                    'comparison_type': 'schema_change',
+                                    'column_name': col,
+                                    'metric': 'added_column',
+                                    'dev_value': 'N/A',
+                                    'uat_value': col,
+                                    'difference': 'N/A',
+                                    'percent_change': None
+                                })
+                            
+                            for col in json_data.get('removed_columns', []):
+                                records.append({
+                                    'comparison_type': 'schema_change',
+                                    'column_name': col,
+                                    'metric': 'removed_column',
+                                    'dev_value': col,
+                                    'uat_value': 'N/A',
+                                    'difference': 'N/A',
+                                    'percent_change': None
+                                })
+                            
+                            return pd.DataFrame(records)
+                    except json.JSONDecodeError as e:
+                        print(f"JSON parsing error: {str(e)}")
+                        print(f"Attempted to parse: {json_str}")
+                        continue
                     except Exception as e:
                         print(f"Error processing results: {str(e)}")
-                        print(f"Results data: {results_data}")
+                        if json_data:
+                            print(f"Data that caused error: {json_data}")
+                        continue
         else:
             print(f"Command failed with return code: {result.returncode}")
             print("Error output:")
@@ -113,11 +129,11 @@ def print_comparison_summary(df):
     row_counts = df[df['comparison_type'] == 'total_rows']
     if not row_counts.empty:
         print("\nRow Count Comparison:")
-        print(f"  DEV: {row_counts['dev_value'].iloc[0]:,}")
-        print(f"  UAT: {row_counts['uat_value'].iloc[0]:,}")
-        print(f"  Difference: {row_counts['difference'].iloc[0]:,}")
+        print(f"  DEV: {row_counts['dev_value'].iloc[0]}")
+        print(f"  UAT: {row_counts['uat_value'].iloc[0]}")
+        print(f"  Difference: {row_counts['difference'].iloc[0]}")
         if pd.notnull(row_counts['percent_change'].iloc[0]):
-            print(f"  Percent Change: {float(row_counts['percent_change'].iloc[0]):.2f}%")
+            print(f"  Percent Change: {row_counts['percent_change'].iloc[0]}%")
     
     # Schema changes (added/removed columns)
     schema_changes = df[df['comparison_type'] == 'schema_change']
@@ -142,7 +158,7 @@ def print_comparison_summary(df):
                 print(f"    DEV: {row['dev_value']}")
                 print(f"    UAT: {row['uat_value']}")
                 if pd.notnull(row['percent_change']):
-                    print(f"    Change: {float(row['percent_change']):.2f}%")
+                    print(f"    Change: {row['percent_change']}%")
 
 def main():
     if len(sys.argv) < 3:
