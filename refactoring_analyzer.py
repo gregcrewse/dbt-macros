@@ -3,6 +3,7 @@ import pandas as pd
 import os
 from difflib import SequenceMatcher
 from collections import defaultdict
+import re
 
 class DBTRefactorAnalyzer:
     def __init__(self, manifest_path):
@@ -259,128 +260,176 @@ class DBTRefactorAnalyzer:
         return pd.DataFrame(metrics)
 
     def generate_refactored_sql(self, redundant_ref):
-            """Generate refactored SQL code for a model with redundant refs"""
-            model = self.models.get(redundant_ref['model'])
-            parent = self.models.get(redundant_ref['parent'])
-            grandparent = self.models.get(redundant_ref['grandparent'])
-            
-            if not all([model, parent, grandparent]):
-                return None
-            
-            # Get original SQL - check different possible locations in the manifest
-            original_sql = None
-            if 'raw_code' in model:  # Try raw_code first
-                original_sql = model['raw_code']
-            elif 'raw_sql' in model:  # Try raw_sql next
-                original_sql = model['raw_sql']
-            elif 'compiled_code' in model:  # Try compiled_code as fallback
-                original_sql = model['compiled_code']
-            
-            if not original_sql:
-                print(f"DEBUG: Available keys in model: {list(model.keys())}")
-                return None
-            
-            # Analyze how the grandparent is referenced
-            gp_name = grandparent.get('name', grandparent['unique_id'].split('.')[-1])
-            p_name = parent.get('name', parent['unique_id'].split('.')[-1])
-            
-            # Find ref patterns for grandparent (expanded to catch more variations)
-            ref_patterns = [
-                f"ref('{gp_name}')",
-                f'ref("{gp_name}")',
-                f"ref('{gp_name}') as",
-                f'ref("{gp_name}") as',
-                f"ref('{gp_name}') ",
-                f'ref("{gp_name}") ',
-                f"ref('{gp_name}')]",
-                f'ref("{gp_name}")]'
-            ]
-            
-            # Find the full ref line(s) that reference the grandparent
-            sql_lines = original_sql.split('\n')
-            gp_ref_lines = []
-            ref_aliases = []
-            
-            for i, line in enumerate(sql_lines):
-                line_lower = line.lower()
-                if any(pattern.lower() in line_lower for pattern in ref_patterns):
-                    gp_ref_lines.append((i, line))
-                    # Try to extract alias - look for both 'as' and into CTE patterns
-                    if ' as ' in line_lower:
-                        alias = line_lower.split(' as ')[-1].strip().strip(',')
-                        ref_aliases.append(alias)
-                    elif 'with ' in line_lower or ',' in line_lower:
-                        parts = line.split('ref')
-                        if len(parts) > 1:
-                            alias_part = parts[0].strip()
-                            if alias_part:
-                                ref_aliases.append(alias_part.strip())
-            
-            # If we found the references, create refactored SQL
-            if gp_ref_lines:
-                refactored_sql = []
-                changes_made = []
-                
-                # Start with any config blocks
-                in_config = False
-                for line in sql_lines:
-                    if '{{' in line and 'config' in line:
-                        in_config = True
-                        refactored_sql.append(line)
-                        continue
-                    if in_config:
-                        refactored_sql.append(line)
-                        if '}}' in line:
-                            in_config = False
-                        continue
-                    break
-                
-                # Add comment explaining the change
-                refactored_sql.extend([
-                    f"-- Refactored to remove redundant reference to {gp_name}",
-                    f"-- These columns are now accessed through {p_name}",
-                    ""
-                ])
-                
-                # Process the rest of the SQL
-                for i, line in enumerate(sql_lines):
-                    # Skip config blocks we already processed
-                    if in_config:
-                        if '}}' in line:
-                            in_config = False
-                        continue
-                        
-                    # Skip the lines that reference the grandparent
-                    if any(i == idx for idx, _ in gp_ref_lines):
-                        changes_made.append(f"Removed reference: {line.strip()}")
-                        continue
-                    
-                    # Replace any references to the grandparent alias in joins
-                    line_modified = line
-                    for alias in ref_aliases:
-                        if alias and alias in line:
-                            # Check if this is a join condition
-                            if 'join' in line.lower() and 'on' in line.lower():
-                                # Replace the grandparent alias with the appropriate parent column
-                                line_modified = line.replace(alias, p_name)
-                                changes_made.append(f"Modified join: {line.strip()} -> {line_modified.strip()}")
-                            # Also check for column references
-                            elif alias + '.' in line:
-                                line_modified = line.replace(alias + '.', p_name + '.')
-                                changes_made.append(f"Modified column reference: {line.strip()} -> {line_modified.strip()}")
-                    
-                    refactored_sql.append(line_modified)
-                
-                return {
-                    'original_sql': original_sql,
-                    'refactored_sql': '\n'.join(refactored_sql),
-                    'changes_made': changes_made,
-                    'model_name': model.get('name', model['unique_id'].split('.')[-1]),
-                    'removed_ref': gp_name,
-                    'use_parent': p_name
-                }
-            
+        """Generate refactored SQL code for a model with redundant refs"""
+        model = self.models.get(redundant_ref['model'])
+        parent = self.models.get(redundant_ref['parent'])
+        grandparent = self.models.get(redundant_ref['grandparent'])
+        
+        if not all([model, parent, grandparent]):
             return None
+        
+        # Get original SQL
+        original_sql = None
+        for sql_field in ['raw_code', 'raw_sql', 'compiled_code']:
+            if sql_field in model:
+                original_sql = model[sql_field]
+                break
+        
+        if not original_sql:
+            print(f"DEBUG: Available keys in model: {list(model.keys())}")
+            return None
+        
+        # Get model names
+        gp_name = grandparent.get('name', grandparent['unique_id'].split('.')[-1])
+        p_name = parent.get('name', parent['unique_id'].split('.')[-1])
+        
+        # Parse SQL into sections
+        sql_sections = {
+            'config': [],
+            'ctes': [],
+            'main_query': []
+        }
+        
+        lines = original_sql.split('\n')
+        current_section = 'main_query'
+        cte_started = False
+        in_config = False
+        
+        # First pass: separate SQL into sections
+        for line in lines:
+            line_lower = line.lower().strip()
+            
+            # Handle config blocks
+            if '{{' in line and 'config' in line_lower:
+                in_config = True
+                current_section = 'config'
+            elif in_config and '}}' in line:
+                in_config = False
+                current_section = 'main_query'
+                
+            # Handle CTEs
+            elif line_lower.startswith('with '):
+                current_section = 'ctes'
+                cte_started = True
+            elif cte_started and line_lower.startswith('select '):
+                current_section = 'main_query'
+                
+            sql_sections[current_section].append(line)
+        
+        # Find and analyze CTE dependencies
+        cte_definitions = {}
+        cte_dependencies = {}
+        current_cte = None
+        
+        cte_text = '\n'.join(sql_sections['ctes'])
+        cte_blocks = cte_text.split(',\n')
+        
+        for block in cte_blocks:
+            # Extract CTE name
+            if 'with ' in block.lower():
+                block = block.lower().split('with ')[1]
+            
+            cte_match = re.match(r'([a-zA-Z0-9_]+)\s+as\s*\(', block.strip(), re.IGNORECASE)
+            if cte_match:
+                current_cte = cte_match.group(1)
+                cte_definitions[current_cte] = block
+                cte_dependencies[current_cte] = []
+                
+                # Check for references to grandparent
+                if f"ref('{gp_name}')" in block or f'ref("{gp_name}")' in block:
+                    cte_dependencies[current_cte].append(gp_name)
+        
+        # Generate refactored SQL
+        refactored_sql = []
+        changes_made = []
+        
+        # Add config blocks
+        refactored_sql.extend(sql_sections['config'])
+        
+        # Add refactoring comment
+        refactored_sql.extend([
+            f"-- Refactored to remove redundant reference to {gp_name}",
+            f"-- These columns are now accessed through {p_name}",
+            ""
+        ])
+        
+        # Process CTEs
+        if sql_sections['ctes']:
+            cte_added = False
+            for line in sql_sections['ctes']:
+                line_lower = line.lower()
+                
+                # Skip CTEs that only reference the grandparent
+                skip_line = False
+                for cte_name, deps in cte_dependencies.items():
+                    if cte_name in line_lower and gp_name in deps and len(deps) == 1:
+                        skip_line = True
+                        changes_made.append(f"Removed CTE: {cte_name} (only referenced {gp_name})")
+                        break
+                
+                if skip_line:
+                    continue
+                    
+                # Replace grandparent refs with parent refs
+                if f"ref('{gp_name}')" in line or f'ref("{gp_name}")' in line:
+                    line = line.replace(f"ref('{gp_name}')", f"ref('{p_name}')")
+                    line = line.replace(f'ref("{gp_name}")', f'ref("{p_name}")')
+                    changes_made.append(f"Replaced ref: {gp_name} -> {p_name}")
+                
+                # Add WITH keyword if this is the first CTE being added
+                if not cte_added and not line_lower.startswith('with '):
+                    refactored_sql.append('WITH')
+                    cte_added = True
+                
+                refactored_sql.append(line)
+        
+        # Process main query
+        main_query_lines = []
+        for line in sql_sections['main_query']:
+            line_lower = line.lower()
+            
+            # Skip lines that directly reference the grandparent
+            if f"ref('{gp_name}')" in line or f'ref("{gp_name}")' in line:
+                changes_made.append(f"Removed reference: {line.strip()}")
+                continue
+            
+            # Replace any CTE references that were removed
+            modified_line = line
+            for cte_name, deps in cte_dependencies.items():
+                if gp_name in deps and len(deps) == 1:
+                    if cte_name in line_lower:
+                        # Replace CTE reference with parent reference
+                        modified_line = re.sub(
+                            rf'\b{cte_name}\b',
+                            p_name,
+                            line,
+                            flags=re.IGNORECASE
+                        )
+                        changes_made.append(f"Replaced CTE reference: {cte_name} -> {p_name}")
+                        break
+            
+            main_query_lines.append(modified_line)
+        
+        # Ensure there's a proper transition from CTEs to main query
+        if sql_sections['ctes'] and main_query_lines:
+            # Remove any additional WITH statements in main query
+            while main_query_lines and 'with ' in main_query_lines[0].lower():
+                main_query_lines.pop(0)
+            
+            # Ensure there's a comma after the last CTE
+            if refactored_sql and not refactored_sql[-1].strip().endswith(','):
+                refactored_sql[-1] = refactored_sql[-1].rstrip() + ','
+        
+        refactored_sql.extend(main_query_lines)
+        
+        return {
+            'original_sql': original_sql,
+            'refactored_sql': '\n'.join(refactored_sql),
+            'changes_made': changes_made,
+            'model_name': model.get('name', model['unique_id'].split('.')[-1]),
+            'removed_ref': gp_name,
+            'use_parent': p_name
+        }
     
     def generate_refactoring_report(self, output_dir='./dbt_analysis'):
         """Generate comprehensive refactoring recommendations"""
