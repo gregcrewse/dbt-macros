@@ -259,10 +259,6 @@ class DBTRefactorAnalyzer:
         
         return pd.DataFrame(metrics)
 
-    import re
-
-    import re
-
     def generate_refactored_sql(self, redundant_ref):
         """Generate refactored SQL code for a model with redundant refs"""
         model = self.models.get(redundant_ref['model'])
@@ -274,13 +270,7 @@ class DBTRefactorAnalyzer:
         
         # Get original SQL - try all possible field names
         original_sql = None
-        sql_fields = [
-            'raw_code',
-            'raw_sql',
-            'compiled_code',
-            'compiled_sql',
-            'sql',  # Add more potential field names
-        ]
+        sql_fields = ['raw_code', 'raw_sql', 'compiled_code', 'compiled_sql', 'sql']
         
         for field in sql_fields:
             if field in model and model[field]:
@@ -297,128 +287,141 @@ class DBTRefactorAnalyzer:
         gp_name = grandparent.get('name', grandparent['unique_id'].split('.')[-1])
         p_name = parent.get('name', parent['unique_id'].split('.')[-1])
         
-        # Initialize sections and tracking variables
-        sections = {
-            'config': [],
-            'comments': [],
-            'ctes': [],
-            'main_query': []
-        }
-        
-        processed_ctes = []
-        cte_deps = {}
-        
-        # Parse SQL into sections
-        lines = original_sql.split('\n')
-        current_section = None
-        config_block = []
-        in_config = False
-        cte_block = []
-        in_cte = False
-        
-        for line in lines:
-            stripped = line.strip()
+        def split_sql_into_parts(sql):
+            """Split SQL into config, CTEs, and main query while preserving structure"""
+            parts = {
+                'config': [],
+                'ctes': [],
+                'main_query': []
+            }
             
-            # Handle config blocks
-            if '{{' in line and 'config' in line.lower():
-                in_config = True
-                config_block = [line]
-                continue
-            elif in_config:
-                config_block.append(line)
-                if '}}' in line:
-                    in_config = False
-                    sections['config'] = config_block
-                continue
+            lines = sql.split('\n')
+            current_section = None
+            cte_depth = 0
+            in_config = False
+            
+            for line in lines:
+                stripped = line.strip()
+                lower = stripped.lower()
                 
-            # Handle CTEs
-            if stripped.lower().startswith('with '):
-                in_cte = True
-                cte_block = [line]
-                continue
-            elif in_cte:
-                cte_block.append(line)
-                if stripped.lower().startswith('select ') and not any(x in stripped.lower() for x in ['from', 'where', 'group by']):
-                    in_cte = False
-                    sections['ctes'] = cte_block
-                continue
-                
-            # Handle main query
-            if not current_section and stripped.lower().startswith('select '):
-                current_section = 'main_query'
-            
-            if current_section == 'main_query':
-                sections['main_query'].append(line)
-            elif stripped.startswith('--'):
-                sections['comments'].append(line)
-        
-        # Process CTEs if they exist
-        if sections['ctes']:
-            cte_text = '\n'.join(sections['ctes'])
-            ctes = re.split(r',\s*(?=\w+\s+as\s*\()', cte_text)
-            
-            for cte in ctes:
-                cte_match = re.match(r'(?:with)?\s*(\w+)\s+as\s*\(', cte.strip(), re.IGNORECASE)
-                if cte_match:
-                    cte_name = cte_match.group(1)
-                    uses_grandparent = (
-                        f"ref('{gp_name}')" in cte or 
-                        f'ref("{gp_name}")' in cte
-                    )
-                    cte_deps[cte_name] = uses_grandparent
+                # Handle config blocks
+                if '{{' in line and 'config' in lower:
+                    in_config = True
+                    current_section = 'config'
+                    parts[current_section].append(line)
+                    continue
+                elif in_config:
+                    parts[current_section].append(line)
+                    if '}}' in line:
+                        in_config = False
+                    continue
                     
-                    # Only keep CTEs that don't reference the grandparent
-                    if not uses_grandparent:
-                        # Replace any references to removed CTEs with parent ref
-                        modified_cte = cte
-                        for dep_name, uses_gp in cte_deps.items():
-                            if uses_gp:
-                                modified_cte = re.sub(
-                                    rf'\b{dep_name}\b',
-                                    f"ref('{p_name}')",
-                                    modified_cte,
-                                    flags=re.IGNORECASE
-                                )
-                        processed_ctes.append(modified_cte)
+                # Track CTE depth with parentheses
+                if not in_config:
+                    cte_depth += line.count('(') - line.count(')')
+                    
+                # Identify sections
+                if lower.startswith('with '):
+                    current_section = 'ctes'
+                elif current_section == 'ctes' and cte_depth == 0 and lower.startswith('select'):
+                    current_section = 'main_query'
+                elif not current_section and lower.startswith('select'):
+                    current_section = 'main_query'
+                
+                # Add line to appropriate section
+                if current_section:
+                    parts[current_section].append(line)
+            
+            return parts
+        
+        def process_ctes(cte_lines):
+            """Process CTEs while maintaining structure and handling nested refs"""
+            if not cte_lines:
+                return [], {}
+                
+            cte_text = '\n'.join(cte_lines)
+            
+            # Split into individual CTEs while preserving structure
+            cte_pattern = r'(?:with\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+as\s*\(((?:[^()]|\((?:[^()]|\([^()]*\))*\))*)\)'
+            ctes = []
+            cte_deps = {}
+            current_pos = 0
+            
+            # Find all CTEs including nested ones
+            matches = list(re.finditer(cte_pattern, cte_text, re.IGNORECASE | re.DOTALL))
+            
+            for i, match in enumerate(matches):
+                cte_name = match.group(1)
+                cte_content = match.group(2)
+                full_match = match.group(0)
+                
+                # Check if this CTE references the grandparent
+                uses_grandparent = (
+                    f"ref('{gp_name}')" in cte_content or 
+                    f'ref("{gp_name}")' in cte_content
+                )
+                
+                cte_deps[cte_name] = uses_grandparent
+                
+                if not uses_grandparent:
+                    # Adjust CTE content to use parent ref if needed
+                    modified_content = cte_content
+                    for dep_name, uses_gp in cte_deps.items():
+                        if uses_gp:
+                            modified_content = re.sub(
+                                rf'\b{dep_name}\b',
+                                f"ref('{p_name}')",
+                                modified_content,
+                                flags=re.IGNORECASE
+                            )
+                    
+                    # Reconstruct CTE with proper formatting
+                    if i == 0:
+                        cte_str = f"with {cte_name} as ({modified_content})"
+                    else:
+                        cte_str = f", {cte_name} as ({modified_content})"
+                        
+                    ctes.append(cte_str)
+            
+            return ctes, cte_deps
+        
+        # Split SQL into parts
+        sql_parts = split_sql_into_parts(original_sql)
+        
+        # Process CTEs
+        processed_ctes, cte_deps = process_ctes(sql_parts['ctes'])
         
         # Generate refactored SQL
         refactored_sql = []
         changes_made = []
         
         # Add config
-        if sections['config']:
-            refactored_sql.extend(sections['config'])
+        if sql_parts['config']:
+            refactored_sql.extend(sql_parts['config'])
             refactored_sql.append('')
         
-        # Add comments about refactoring
+        # Add refactoring comments
         refactored_sql.extend([
             f"-- Refactored to remove redundant reference to {gp_name}",
             f"-- These columns are now accessed through {p_name}",
             ""
         ])
         
-        # Add processed CTEs if they exist
+        # Add processed CTEs
         if processed_ctes:
-            first_cte = processed_ctes[0].strip()
-            if not first_cte.lower().startswith('with '):
-                refactored_sql.append('with')
             refactored_sql.extend(processed_ctes)
-            
-            # Ensure proper transition from CTEs to main query
-            last_cte = processed_ctes[-1].rstrip()
-            if not last_cte.endswith(','):
-                if not last_cte.endswith(')'):
-                    refactored_sql[-1] = refactored_sql[-1].rstrip() + ','
         
         # Process main query
-        main_query = []
-        for line in sections['main_query']:
+        main_query_lines = []
+        in_main_select = False
+        
+        for line in sql_parts['main_query']:
             # Skip lines that reference the grandparent directly
             if f"ref('{gp_name}')" in line or f'ref("{gp_name}")' in line:
                 changes_made.append(f"Removed reference: {line.strip()}")
                 continue
             
-            # Replace references to removed CTEs with parent references
+            # Replace references to removed CTEs
             modified_line = line
             for cte_name, uses_gp in cte_deps.items():
                 if uses_gp:
@@ -428,13 +431,14 @@ class DBTRefactorAnalyzer:
                         modified_line,
                         flags=re.IGNORECASE
                     )
-            main_query.append(modified_line)
+            
+            main_query_lines.append(modified_line)
         
-        refactored_sql.extend(main_query)
+        refactored_sql.extend(main_query_lines)
         
         # Add debugging information
         print(f"\nProcessing complete for {model.get('name', model['unique_id'])}")
-        print(f"Number of CTEs processed: {len(processed_ctes)}")
+        print(f"Number of CTEs: {len(processed_ctes)}")
         print(f"Number of changes made: {len(changes_made)}")
         
         return {
