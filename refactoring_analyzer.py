@@ -760,227 +760,227 @@ class DBTRefactorAnalyzer:
             
             return sorted(similar_pairs, key=lambda x: x['total_similarity'], reverse=True)
     
-        def _generate_similarity_suggestion(self, model1_id, model2_id, sig1, sig2):
-            """Generate detailed suggestion for similar models"""
-            model1_name = model1_id.split('.')[-1]
-            model2_name = model2_id.split('.')[-1]
+    def _generate_similarity_suggestion(self, model1_id, model2_id, sig1, sig2):
+        """Generate detailed suggestion for similar models"""
+        model1_name = model1_id.split('.')[-1]
+        model2_name = model2_id.split('.')[-1]
+        
+        shared_refs = sig1['refs'].intersection(sig2['refs'])
+        shared_patterns = {
+            k: v for k, v in sig1['cte_patterns'].items()
+            if sig2['cte_patterns'].get(k) == v
+        }
+        
+        suggestion = [
+            f"Models '{model1_name}' and '{model2_name}' show significant similarity in structure and logic."
+        ]
+        
+        if shared_refs:
+            suggestion.append(f"They share {len(shared_refs)} upstream dependencies.")
             
-            shared_refs = sig1['refs'].intersection(sig2['refs'])
-            shared_patterns = {
-                k: v for k, v in sig1['cte_patterns'].items()
-                if sig2['cte_patterns'].get(k) == v
-            }
+        if shared_patterns:
+            pattern_list = [f"{k} ({v} occurrences)" for k, v in shared_patterns.items()]
+            suggestion.append(f"Common patterns: {', '.join(pattern_list)}.")
             
-            suggestion = [
-                f"Models '{model1_name}' and '{model2_name}' show significant similarity in structure and logic."
-            ]
-            
-            if shared_refs:
-                suggestion.append(f"They share {len(shared_refs)} upstream dependencies.")
-                
-            if shared_patterns:
-                pattern_list = [f"{k} ({v} occurrences)" for k, v in shared_patterns.items()]
-                suggestion.append(f"Common patterns: {', '.join(pattern_list)}.")
-                
-            suggestion.append(
-                "Consider creating a shared intermediate model for common logic "
-                "or combining these models if they serve similar business purposes."
-            )
-            
-            return " ".join(suggestion)
+        suggestion.append(
+            "Consider creating a shared intermediate model for common logic "
+            "or combining these models if they serve similar business purposes."
+        )
+        
+        return " ".join(suggestion)
 
     def find_combinable_intermediates(self):
-            """Find intermediate models that could potentially be combined"""
-            combinable = []
+        """Find intermediate models that could potentially be combined"""
+        combinable = []
+        
+        def analyze_combination_feasibility(model1_id: str, model2_id: str) -> dict:
+            """Analyze whether two models can be feasibly combined"""
+            model1 = self.models[model1_id]
+            model2 = self.models[model2_id]
             
-            def analyze_combination_feasibility(model1_id: str, model2_id: str) -> dict:
-                """Analyze whether two models can be feasibly combined"""
-                model1 = self.models[model1_id]
-                model2 = self.models[model2_id]
+            # Parse both models
+            sql1 = self.parse_sql_components(model1.get('raw_sql', ''))
+            sql2 = self.parse_sql_components(model2.get('raw_sql', ''))
+            
+            # Analyze dependencies
+            deps1 = self.get_model_refs(model1_id)
+            deps2 = self.get_model_refs(model2_id)
+            shared_deps = deps1.intersection(deps2)
+            
+            # Analyze columns
+            cols1 = self.get_available_columns(model1_id)
+            cols2 = self.get_available_columns(model2_id)
+            shared_cols = cols1.intersection(cols2)
+            
+            # Check for conflicting transformations
+            conflicts = []
+            if sql1.ctes.keys() & sql2.ctes.keys():
+                conflicts.append("Overlapping CTE names")
                 
-                # Parse both models
-                sql1 = self.parse_sql_components(model1.get('raw_sql', ''))
-                sql2 = self.parse_sql_components(model2.get('raw_sql', ''))
-                
-                # Analyze dependencies
-                deps1 = self.get_model_refs(model1_id)
-                deps2 = self.get_model_refs(model2_id)
-                shared_deps = deps1.intersection(deps2)
-                
-                # Analyze columns
-                cols1 = self.get_available_columns(model1_id)
-                cols2 = self.get_available_columns(model2_id)
-                shared_cols = cols1.intersection(cols2)
-                
-                # Check for conflicting transformations
-                conflicts = []
-                if sql1.ctes.keys() & sql2.ctes.keys():
-                    conflicts.append("Overlapping CTE names")
+            # Check for complex window functions or aggregations that might be hard to combine
+            complexity_factors = []
+            for sql in [str(sql1.main_query), str(sql2.main_query)]:
+                if 'partition by' in sql.lower():
+                    complexity_factors.append("Uses window partitioning")
+                if 'dense_rank()' in sql.lower() or 'row_number()' in sql.lower():
+                    complexity_factors.append("Uses ranking functions")
                     
-                # Check for complex window functions or aggregations that might be hard to combine
-                complexity_factors = []
-                for sql in [str(sql1.main_query), str(sql2.main_query)]:
-                    if 'partition by' in sql.lower():
-                        complexity_factors.append("Uses window partitioning")
-                    if 'dense_rank()' in sql.lower() or 'row_number()' in sql.lower():
-                        complexity_factors.append("Uses ranking functions")
-                        
-                return {
-                    'shared_dependencies': shared_deps,
-                    'shared_columns': shared_cols,
-                    'conflicts': conflicts,
-                    'complexity_factors': complexity_factors,
-                    'feasible': not conflicts and len(complexity_factors) < 2
-                }
+            return {
+                'shared_dependencies': shared_deps,
+                'shared_columns': shared_cols,
+                'conflicts': conflicts,
+                'complexity_factors': complexity_factors,
+                'feasible': not conflicts and len(complexity_factors) < 2
+            }
     
-            # Find intermediate models
-            int_models = {k: v for k, v in self.models.items() 
-                         if k.split('.')[-1].startswith('int_')}
+        # Find intermediate models
+        int_models = {k: v for k, v in self.models.items() 
+                     if k.split('.')[-1].startswith('int_')}
+        
+        for model_id, model in int_models.items():
+            children = self.get_model_children(model_id)
+            parents = self.get_model_parents(model_id)
             
-            for model_id, model in int_models.items():
-                children = self.get_model_children(model_id)
-                parents = self.get_model_parents(model_id)
+            # Case 1: Intermediate model with single child
+            if len(children) == 1:
+                child_id = list(children)[0]
+                child_model = self.models[child_id]
                 
-                # Case 1: Intermediate model with single child
-                if len(children) == 1:
-                    child_id = list(children)[0]
-                    child_model = self.models[child_id]
-                    
-                    # If child is also an intermediate model
-                    if child_id.split('.')[-1].startswith('int_'):
-                        feasibility = analyze_combination_feasibility(model_id, child_id)
+                # If child is also an intermediate model
+                if child_id.split('.')[-1].startswith('int_'):
+                    feasibility = analyze_combination_feasibility(model_id, child_id)
+                    if feasibility['feasible']:
+                        combinable.append({
+                            'model': model_id,
+                            'related_model': child_id,
+                            'pattern': 'single_child',
+                            'reason': (
+                                f'Single child intermediate model that feeds into another '
+                                f'intermediate model ({child_id})'
+                            ),
+                            'shared_deps': len(feasibility['shared_dependencies']),
+                            'shared_cols': len(feasibility['shared_columns']),
+                            'suggestion': self._generate_combination_suggestion(
+                                model_id, child_id, feasibility)
+                        })
+            
+            # Case 2: Intermediate model with single parent
+            if len(parents) == 1:
+                parent_id = list(parents)[0]
+                # If parent is also an intermediate model
+                if parent_id.split('.')[-1].startswith('int_'):
+                    # Check if parent only feeds this and similar models
+                    parent_children = self.get_model_children(parent_id)
+                    if len(parent_children) <= 2:
+                        feasibility = analyze_combination_feasibility(model_id, parent_id)
                         if feasibility['feasible']:
                             combinable.append({
                                 'model': model_id,
-                                'related_model': child_id,
-                                'pattern': 'single_child',
+                                'related_model': parent_id,
+                                'pattern': 'single_parent',
                                 'reason': (
-                                    f'Single child intermediate model that feeds into another '
-                                    f'intermediate model ({child_id})'
+                                    f'Single parent intermediate model that comes from another '
+                                    f'intermediate model ({parent_id})'
                                 ),
                                 'shared_deps': len(feasibility['shared_dependencies']),
                                 'shared_cols': len(feasibility['shared_columns']),
                                 'suggestion': self._generate_combination_suggestion(
-                                    model_id, child_id, feasibility)
+                                    model_id, parent_id, feasibility)
                             })
-                
-                # Case 2: Intermediate model with single parent
-                if len(parents) == 1:
-                    parent_id = list(parents)[0]
-                    # If parent is also an intermediate model
-                    if parent_id.split('.')[-1].startswith('int_'):
-                        # Check if parent only feeds this and similar models
-                        parent_children = self.get_model_children(parent_id)
-                        if len(parent_children) <= 2:
-                            feasibility = analyze_combination_feasibility(model_id, parent_id)
-                            if feasibility['feasible']:
-                                combinable.append({
-                                    'model': model_id,
-                                    'related_model': parent_id,
-                                    'pattern': 'single_parent',
-                                    'reason': (
-                                        f'Single parent intermediate model that comes from another '
-                                        f'intermediate model ({parent_id})'
-                                    ),
-                                    'shared_deps': len(feasibility['shared_dependencies']),
-                                    'shared_cols': len(feasibility['shared_columns']),
-                                    'suggestion': self._generate_combination_suggestion(
-                                        model_id, parent_id, feasibility)
-                                })
-            
-            return combinable
+        
+        return combinable
     
-        def _generate_combination_suggestion(self, model1_id: str, model2_id: str, 
-                                          feasibility: dict) -> str:
-            """Generate detailed suggestion for combining intermediate models"""
-            model1_name = model1_id.split('.')[-1]
-            model2_name = model2_id.split('.')[-1]
-            
-            suggestion = [
-                f"Models '{model1_name}' and '{model2_name}' are good candidates for combination."
-            ]
-            
-            if feasibility['shared_dependencies']:
-                suggestion.append(
-                    f"They share {len(feasibility['shared_dependencies'])} upstream dependencies."
-                )
-                
-            if feasibility['shared_columns']:
-                suggestion.append(
-                    f"They share {len(feasibility['shared_columns'])} columns, "
-                    "suggesting overlapping business concepts."
-                )
-                
+    def _generate_combination_suggestion(self, model1_id: str, model2_id: str, 
+                                      feasibility: dict) -> str:
+        """Generate detailed suggestion for combining intermediate models"""
+        model1_name = model1_id.split('.')[-1]
+        model2_name = model2_id.split('.')[-1]
+        
+        suggestion = [
+            f"Models '{model1_name}' and '{model2_name}' are good candidates for combination."
+        ]
+        
+        if feasibility['shared_dependencies']:
             suggestion.append(
-                "Consider combining these models to reduce the number of intermediate "
-                "transformations and simplify the DAG."
+                f"They share {len(feasibility['shared_dependencies'])} upstream dependencies."
             )
             
-            if feasibility.get('complexity_factors'):
-                suggestion.append(
-                    "Note: Some complex transformations present. "
-                    "Review carefully before combining."
-                )
-                
-            return " ".join(suggestion)
-    
-        def get_model_complexity_metrics(self):
-            """Calculate complexity metrics for each model"""
-            metrics = []
+        if feasibility['shared_columns']:
+            suggestion.append(
+                f"They share {len(feasibility['shared_columns'])} columns, "
+                "suggesting overlapping business concepts."
+            )
             
-            for model_id, model in self.models.items():
-                sql = model.get('raw_sql', '')
-                if not sql:
-                    continue
-                    
-                sql_component = self.parse_sql_components(sql)
-                
-                # Calculate various complexity metrics
-                metrics.append({
-                    'model': model_id,
-                    'num_joins': len(re.findall(r'\bjoin\b', sql.lower())),
-                    'num_ctes': len(sql_component.ctes),
-                    'num_refs': len(model.get('refs', [])),
-                    'num_sources': len(model.get('sources', [])),
-                    'num_children': len(self.get_model_children(model_id)),
-                    'num_parents': len(self.get_model_parents(model_id)),
-                    'sql_length': len(sql),
-                    'num_window_funcs': len(re.findall(r'over\s*\(', sql.lower())),
-                    'num_aggregations': len(re.findall(r'\b(sum|avg|count|min|max)\s*\(', sql.lower())),
-                    'num_case_statements': len(re.findall(r'\bcase\b', sql.lower())),
-                    'complexity_score': self._calculate_complexity_score(sql_component)
-                })
+        suggestion.append(
+            "Consider combining these models to reduce the number of intermediate "
+            "transformations and simplify the DAG."
+        )
+        
+        if feasibility.get('complexity_factors'):
+            suggestion.append(
+                "Note: Some complex transformations present. "
+                "Review carefully before combining."
+            )
             
-            return pd.DataFrame(metrics)
+        return " ".join(suggestion)
 
     def _calculate_complexity_score(self, sql_component: SQLComponent) -> float:
-            """Calculate a complexity score for a model based on various factors"""
-            weights = {
-                'ctes': 1.0,
-                'joins': 1.5,
-                'window_funcs': 2.0,
-                'aggregations': 1.0,
-                'case_statements': 0.5,
-                'dependencies': 1.0,
-                'filters': 0.5
-            }
+        """Calculate a complexity score for a model based on various factors"""
+        weights = {
+            'ctes': 1.0,
+            'joins': 1.5,
+            'window_funcs': 2.0,
+            'aggregations': 1.0,
+            'case_statements': 0.5,
+            'dependencies': 1.0,
+            'filters': 0.5
+        }
+        
+        sql = str(sql_component.main_query)
+        
+        factors = {
+            'ctes': len(sql_component.ctes),
+            'joins': len(re.findall(r'\bjoin\b', sql.lower())),
+            'window_funcs': len(re.findall(r'over\s*\(', sql.lower())),
+            'aggregations': len(re.findall(r'\b(sum|avg|count|min|max)\s*\(', sql.lower())),
+            'case_statements': len(re.findall(r'\bcase\b', sql.lower())),
+            'dependencies': len(set().union(*(cte.dependencies for cte in sql_component.ctes.values()))),
+            'filters': len(re.findall(r'\bwhere\b', sql.lower()))
+        }
+        
+        score = sum(count * weights[factor] for factor, count in factors.items())
+        
+        # Normalize to 0-100 scale
+        return min(100, score * 5)
+    
+    def get_model_complexity_metrics(self):
+        """Calculate complexity metrics for each model"""
+        metrics = []
+        
+        for model_id, model in self.models.items():
+            sql = model.get('raw_sql', '')
+            if not sql:
+                continue
+                
+            sql_component = self.parse_sql_components(sql)
             
-            sql = str(sql_component.main_query)
-            
-            factors = {
-                'ctes': len(sql_component.ctes),
-                'joins': len(re.findall(r'\bjoin\b', sql.lower())),
-                'window_funcs': len(re.findall(r'over\s*\(', sql.lower())),
-                'aggregations': len(re.findall(r'\b(sum|avg|count|min|max)\s*\(', sql.lower())),
-                'case_statements': len(re.findall(r'\bcase\b', sql.lower())),
-                'dependencies': len(set().union(*(cte.dependencies for cte in sql_component.ctes.values()))),
-                'filters': len(re.findall(r'\bwhere\b', sql.lower()))
-            }
-            
-            score = sum(count * weights[factor] for factor, count in factors.items())
-            
-            # Normalize to 0-100 scale
-            return min(100, score * 5)
+            # Calculate various complexity metrics
+            metrics.append({
+                'model': model_id,
+                'num_joins': len(re.findall(r'\bjoin\b', sql.lower())),
+                'num_ctes': len(sql_component.ctes),
+                'num_refs': len(model.get('refs', [])),
+                'num_sources': len(model.get('sources', [])),
+                'num_children': len(self.get_model_children(model_id)),
+                'num_parents': len(self.get_model_parents(model_id)),
+                'sql_length': len(sql),
+                'num_window_funcs': len(re.findall(r'over\s*\(', sql.lower())),
+                'num_aggregations': len(re.findall(r'\b(sum|avg|count|min|max)\s*\(', sql.lower())),
+                'num_case_statements': len(re.findall(r'\bcase\b', sql.lower())),
+                'complexity_score': self._calculate_complexity_score(sql_component)
+            })
+        
+        return pd.DataFrame(metrics)
 
     def _generate_markdown_report(self, output_dir: str, results: dict, recommendations: list):
         """Generate a detailed markdown report of all findings and recommendations"""
