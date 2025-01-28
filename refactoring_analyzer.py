@@ -261,6 +261,8 @@ class DBTRefactorAnalyzer:
 
     import re
 
+    import re
+
     def generate_refactored_sql(self, redundant_ref):
         """Generate refactored SQL code for a model with redundant refs"""
         model = self.models.get(redundant_ref['model'])
@@ -270,28 +272,41 @@ class DBTRefactorAnalyzer:
         if not all([model, parent, grandparent]):
             return None
         
-        # Get original SQL
+        # Get original SQL - try all possible field names
         original_sql = None
-        for sql_field in ['raw_code', 'raw_sql', 'compiled_code']:
-            if sql_field in model:
-                original_sql = model[sql_field]
+        sql_fields = [
+            'raw_code',
+            'raw_sql',
+            'compiled_code',
+            'compiled_sql',
+            'sql',  # Add more potential field names
+        ]
+        
+        for field in sql_fields:
+            if field in model and model[field]:
+                original_sql = model[field]
+                print(f"Found SQL in field: {field}")
                 break
         
         if not original_sql:
-            print(f"DEBUG: Available keys in model: {list(model.keys())}")
+            print(f"DEBUG: Could not find SQL in any of these fields: {sql_fields}")
+            print(f"Available keys in model: {list(model.keys())}")
             return None
         
         # Get model names
         gp_name = grandparent.get('name', grandparent['unique_id'].split('.')[-1])
         p_name = parent.get('name', parent['unique_id'].split('.')[-1])
         
-        # Initialize sections
+        # Initialize sections and tracking variables
         sections = {
             'config': [],
             'comments': [],
             'ctes': [],
             'main_query': []
         }
+        
+        processed_ctes = []
+        cte_deps = {}
         
         # Parse SQL into sections
         lines = original_sql.split('\n')
@@ -337,14 +352,11 @@ class DBTRefactorAnalyzer:
             elif stripped.startswith('--'):
                 sections['comments'].append(line)
         
-        # Process CTEs
+        # Process CTEs if they exist
         if sections['ctes']:
             cte_text = '\n'.join(sections['ctes'])
             ctes = re.split(r',\s*(?=\w+\s+as\s*\()', cte_text)
-            processed_ctes = []
             
-            # Track which CTEs reference the grandparent
-            cte_deps = {}
             for cte in ctes:
                 cte_match = re.match(r'(?:with)?\s*(\w+)\s+as\s*\(', cte.strip(), re.IGNORECASE)
                 if cte_match:
@@ -385,12 +397,18 @@ class DBTRefactorAnalyzer:
             ""
         ])
         
-        # Add processed CTEs
+        # Add processed CTEs if they exist
         if processed_ctes:
             first_cte = processed_ctes[0].strip()
             if not first_cte.lower().startswith('with '):
                 refactored_sql.append('with')
             refactored_sql.extend(processed_ctes)
+            
+            # Ensure proper transition from CTEs to main query
+            last_cte = processed_ctes[-1].rstrip()
+            if not last_cte.endswith(','):
+                if not last_cte.endswith(')'):
+                    refactored_sql[-1] = refactored_sql[-1].rstrip() + ','
         
         # Process main query
         main_query = []
@@ -412,15 +430,12 @@ class DBTRefactorAnalyzer:
                     )
             main_query.append(modified_line)
         
-        # Ensure proper transition from CTEs to main query
-        if processed_ctes and main_query:
-            # If last CTE doesn't end with comma and isn't the final line
-            last_cte = processed_ctes[-1].rstrip()
-            if not last_cte.endswith(','):
-                if not last_cte.endswith(')'):
-                    refactored_sql[-1] = refactored_sql[-1].rstrip() + ','
-        
         refactored_sql.extend(main_query)
+        
+        # Add debugging information
+        print(f"\nProcessing complete for {model.get('name', model['unique_id'])}")
+        print(f"Number of CTEs processed: {len(processed_ctes)}")
+        print(f"Number of changes made: {len(changes_made)}")
         
         return {
             'original_sql': original_sql,
