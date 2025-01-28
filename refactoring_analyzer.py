@@ -287,10 +287,17 @@ class DBTRefactorAnalyzer:
         gp_name = grandparent.get('name', grandparent['unique_id'].split('.')[-1])
         p_name = parent.get('name', parent['unique_id'].split('.')[-1])
         
+        def extract_config_block(sql):
+            """Extract the config block from SQL, if present"""
+            config_pattern = r'({{\s*config[^}]+}})'
+            match = re.search(config_pattern, sql, re.DOTALL)
+            if match:
+                return match.group(1), sql[match.end():].strip()
+            return None, sql
+    
         def split_sql_into_parts(sql):
-            """Split SQL into config, CTEs, and main query while preserving structure"""
+            """Split SQL into CTEs and main query while preserving structure"""
             parts = {
-                'config': [],
                 'ctes': [],
                 'main_query': []
             }
@@ -298,27 +305,13 @@ class DBTRefactorAnalyzer:
             lines = sql.split('\n')
             current_section = None
             cte_depth = 0
-            in_config = False
             
             for line in lines:
                 stripped = line.strip()
                 lower = stripped.lower()
                 
-                # Handle config blocks
-                if '{{' in line and 'config' in lower:
-                    in_config = True
-                    current_section = 'config'
-                    parts[current_section].append(line)
-                    continue
-                elif in_config:
-                    parts[current_section].append(line)
-                    if '}}' in line:
-                        in_config = False
-                    continue
-                    
                 # Track CTE depth with parentheses
-                if not in_config:
-                    cte_depth += line.count('(') - line.count(')')
+                cte_depth += line.count('(') - line.count(')')
                     
                 # Identify sections
                 if lower.startswith('with '):
@@ -335,7 +328,7 @@ class DBTRefactorAnalyzer:
             return parts
         
         def process_ctes(cte_lines):
-            """Process CTEs while maintaining structure and handling nested refs"""
+            """Process CTEs while maintaining structure and removing redundant ones"""
             if not cte_lines:
                 return [], {}
                 
@@ -346,6 +339,7 @@ class DBTRefactorAnalyzer:
             ctes = []
             cte_deps = {}
             current_pos = 0
+            first_cte = True
             
             # Find all CTEs including nested ones
             matches = list(re.finditer(cte_pattern, cte_text, re.IGNORECASE | re.DOTALL))
@@ -353,40 +347,47 @@ class DBTRefactorAnalyzer:
             for i, match in enumerate(matches):
                 cte_name = match.group(1)
                 cte_content = match.group(2)
-                full_match = match.group(0)
                 
-                # Check if this CTE references the grandparent
+                # Check if this CTE only references the grandparent
                 uses_grandparent = (
                     f"ref('{gp_name}')" in cte_content or 
                     f'ref("{gp_name}")' in cte_content
                 )
                 
-                cte_deps[cte_name] = uses_grandparent
+                # Skip CTEs that only reference the grandparent and are used for filtering
+                if uses_grandparent and 'from ' + gp_name in cte_content.lower():
+                    cte_deps[cte_name] = True
+                    continue
                 
-                if not uses_grandparent:
-                    # Adjust CTE content to use parent ref if needed
-                    modified_content = cte_content
-                    for dep_name, uses_gp in cte_deps.items():
-                        if uses_gp:
-                            modified_content = re.sub(
-                                rf'\b{dep_name}\b',
-                                f"ref('{p_name}')",
-                                modified_content,
-                                flags=re.IGNORECASE
-                            )
+                # Process CTE content
+                modified_content = cte_content
+                for dep_name, uses_gp in cte_deps.items():
+                    if uses_gp and dep_name in modified_content:
+                        # If CTE referenced a removed CTE that got data from grandparent,
+                        # update to use parent instead
+                        modified_content = re.sub(
+                            rf'\b{dep_name}\b',
+                            f"ref('{p_name}')",
+                            modified_content,
+                            flags=re.IGNORECASE
+                        )
+                
+                # Reconstruct CTE with proper formatting
+                if first_cte:
+                    cte_str = f"with {cte_name} as ({modified_content})"
+                    first_cte = False
+                else:
+                    cte_str = f", {cte_name} as ({modified_content})"
                     
-                    # Reconstruct CTE with proper formatting
-                    if i == 0:
-                        cte_str = f"with {cte_name} as ({modified_content})"
-                    else:
-                        cte_str = f", {cte_name} as ({modified_content})"
-                        
-                    ctes.append(cte_str)
+                ctes.append(cte_str)
             
             return ctes, cte_deps
         
-        # Split SQL into parts
-        sql_parts = split_sql_into_parts(original_sql)
+        # Extract config block
+        config_block, remaining_sql = extract_config_block(original_sql)
+        
+        # Split remaining SQL into parts
+        sql_parts = split_sql_into_parts(remaining_sql)
         
         # Process CTEs
         processed_ctes, cte_deps = process_ctes(sql_parts['ctes'])
@@ -395,9 +396,9 @@ class DBTRefactorAnalyzer:
         refactored_sql = []
         changes_made = []
         
-        # Add config
-        if sql_parts['config']:
-            refactored_sql.extend(sql_parts['config'])
+        # Add config block if present
+        if config_block:
+            refactored_sql.append(config_block)
             refactored_sql.append('')
         
         # Add refactoring comments
@@ -413,7 +414,6 @@ class DBTRefactorAnalyzer:
         
         # Process main query
         main_query_lines = []
-        in_main_select = False
         
         for line in sql_parts['main_query']:
             # Skip lines that reference the grandparent directly
@@ -421,13 +421,22 @@ class DBTRefactorAnalyzer:
                 changes_made.append(f"Removed reference: {line.strip()}")
                 continue
             
-            # Replace references to removed CTEs
+            # Replace references to removed CTEs with parent ref
             modified_line = line
             for cte_name, uses_gp in cte_deps.items():
                 if uses_gp:
                     modified_line = re.sub(
                         rf'\b{cte_name}\b',
                         f"ref('{p_name}')",
+                        modified_line,
+                        flags=re.IGNORECASE
+                    )
+                
+                # Update any WHERE clauses that referenced the const CTE
+                if 'from const' in modified_line.lower():
+                    modified_line = re.sub(
+                        r'>=\s*\(select\s+[a-zA-Z_][a-zA-Z0-9_]*\s+from\s+const\)',
+                        f">= (select migration_to_salesforce_date_utc from {p_name})",
                         modified_line,
                         flags=re.IGNORECASE
                     )
