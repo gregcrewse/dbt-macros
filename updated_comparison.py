@@ -44,15 +44,36 @@ def find_model_path(model_name):
 def get_main_branch_content(model_path):
     """Get content of the file from main branch."""
     try:
+        # Get the git root directory
+        git_root = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            text=True,
+            check=True
+        ).stdout.strip()
+        
+        # Convert model_path to be relative to git root
+        git_root_path = Path(git_root)
+        try:
+            relative_path = model_path.relative_to(git_root_path)
+        except ValueError:
+            relative_path = model_path
+
+        print(f"Looking for file in main branch at: {relative_path}")
+        
         result = subprocess.run(
-            ['git', 'show', f'main:{model_path}'], 
+            ['git', 'show', f'main:{relative_path}'], 
             capture_output=True, 
             text=True,
             check=True
         )
         return result.stdout
-    except subprocess.CalledProcessError:
-        print(f"Warning: Could not find {model_path} in main branch")
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Could not find {relative_path} in main branch")
+        print(f"Git error: {e.stderr.decode()}")
+        return None
+    except Exception as e:
+        print(f"Error accessing main branch content: {str(e)}")
         return None
 
 def create_temp_model(content, changes, original_name, model_dir) -> Tuple[Path, str]:
