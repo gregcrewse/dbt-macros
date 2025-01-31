@@ -1,96 +1,62 @@
-import os
-import sys
 import subprocess
 import json
 from pathlib import Path
 
-def debug_find_model(model_name):
-    """Debug helper to find a dbt model."""
-    print("\nDebugging model path search:")
+def main():
+    print("\nBasic DBT Environment Check:")
     
-    # 1. Check current directory
-    print(f"\n1. Current working directory: {Path.cwd()}")
-    
-    # 2. Try dbt list
-    print("\n2. Trying dbt list...")
+    # 1. Check if dbt is installed and accessible
+    print("\n1. Checking dbt installation...")
     try:
-        result = subprocess.run(
-            ['dbt', 'list', '--resource-type', 'model', '--output', 'json'],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        models = json.loads(result.stdout)
-        print(f"Found {len(models)} models in dbt list")
-        
-        for model in models:
-            if model.get('name') == model_name:
-                path = Path(model.get('original_file_path', ''))
-                print(f"Found model in dbt list: {path}")
-                if path.exists():
-                    print(f"Path exists!")
-                    return path
-                else:
-                    print(f"Path does not exist")
-                
-    except subprocess.CalledProcessError as e:
-        print(f"Error running dbt list: {e}")
-        print(f"stderr: {e.stderr}")
-    except json.JSONDecodeError as e:
-        print(f"Error parsing dbt list output: {e}")
-        print(f"Output was: {result.stdout[:200]}...")
+        version_result = subprocess.run(['dbt', '--version'], capture_output=True, text=True)
+        print(f"DBT Version output: {version_result.stdout}")
+    except FileNotFoundError:
+        print("ERROR: dbt command not found. Is dbt installed and in your PATH?")
+        return
     except Exception as e:
-        print(f"Unexpected error: {e}")
-    
-    # 3. Try finding project root
+        print(f"Error running dbt --version: {e}")
+        return
+
+    # 2. Print current working directory
+    print(f"\n2. Current working directory: {Path.cwd()}")
+
+    # 3. Look for dbt_project.yml
     print("\n3. Looking for dbt_project.yml...")
     current = Path.cwd()
-    project_root = None
+    found_project = False
     while current != current.parent:
         if (current / 'dbt_project.yml').exists():
-            project_root = current
-            print(f"Found project root: {project_root}")
+            print(f"Found dbt_project.yml at: {current}")
+            found_project = True
+            
+            # List contents of models directory
+            models_dir = current / 'models'
+            if models_dir.exists():
+                print(f"\nContents of {models_dir}:")
+                for item in models_dir.rglob('*.sql'):
+                    print(f"  {item.relative_to(models_dir)}")
             break
         current = current.parent
     
-    if not project_root:
-        print("Could not find dbt_project.yml")
-        return None
-        
-    # 4. Search common directories
-    print("\n4. Searching common model directories...")
-    common_locations = [
-        project_root / 'models',
-        project_root / 'models/marts',
-        project_root / 'models/intermediate',
-        project_root / 'models/staging'
-    ]
-    
-    for location in common_locations:
-        print(f"\nChecking {location}")
-        if location.exists():
-            print(f"Directory exists")
-            for file_path in location.rglob(f"{model_name}.sql"):
-                print(f"Found file: {file_path}")
-                return file_path
-        else:
-            print(f"Directory does not exist")
-    
-    print("\nCould not find model path")
-    return None
+    if not found_project:
+        print("Could not find dbt_project.yml in any parent directory")
+        return
 
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: python script.py model_name")
-        sys.exit(1)
-        
-    model_name = sys.argv[1]
-    model_path = debug_find_model(model_name)
-    
-    if model_path:
-        print(f"\nSuccessfully found model at: {model_path}")
-    else:
-        print("\nFailed to find model")
+    # 4. Try dbt list
+    print("\n4. Running dbt list...")
+    try:
+        list_result = subprocess.run(
+            ['dbt', 'list', '--resource-type', 'model'],
+            capture_output=True,
+            text=True
+        )
+        print("DBT List output:")
+        print(list_result.stdout)
+        if list_result.stderr:
+            print("DBT List errors:")
+            print(list_result.stderr)
+    except Exception as e:
+        print(f"Error running dbt list: {e}")
 
 if __name__ == "__main__":
     main()
