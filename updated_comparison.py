@@ -7,6 +7,60 @@ import datetime
 import json
 import re
 
+def find_dbt_project_root():
+    """Find the root directory of the dbt project by looking for dbt_project.yml"""
+    current = Path.cwd()
+    while current != current.parent:
+        if (current / 'dbt_project.yml').exists():
+            return current
+        current = current.parent
+    return None
+
+def find_model_path(model_name):
+    """Find the full path to a model using dbt list."""
+    try:
+        # Run dbt list to get all model information
+        result = subprocess.run(
+            ['dbt', 'list', '--output', 'json'], 
+            capture_output=True, 
+            text=True,
+            check=True
+        )
+        models = json.loads(result.stdout)
+        
+        # Look for the model in the list
+        for model in models:
+            if model.get('name') == model_name:
+                return Path(model.get('original_file_path', ''))
+                
+        # If not found in dbt list, try common locations
+        project_root = find_dbt_project_root()
+        if project_root:
+            common_locations = [
+                project_root / 'models',
+                project_root / 'models/marts',
+                project_root / 'models/intermediate',
+                project_root / 'models/staging'
+            ]
+            
+            possible_filenames = [
+                f"{model_name}.sql",
+                f"{model_name}.yml",
+                f"{model_name}.md"
+            ]
+            
+            for location in common_locations:
+                if location.exists():
+                    for filename in possible_filenames:
+                        for file_path in location.rglob(filename):
+                            if file_path.stem == model_name:
+                                return file_path
+                    
+        return None
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        print(f"Error finding model path: {str(e)}")
+        return None
+
 def get_main_branch_content(model_path):
     """Get content of the file from main branch."""
     try:
@@ -212,7 +266,7 @@ def generate_comparison_query(original_model, changed_model):
 
 def main():
     parser = argparse.ArgumentParser(description='Test DBT model changes')
-    parser.add_argument('model_path', help='Path to the model to test')
+    parser.add_argument('model_name', help='Name of the model to test (with or without path)')
     parser.add_argument('--changes', nargs='+', help='Changes to apply in old:new format')
     parser.add_argument('--against-main', action='store_true',
                         help='Compare against version in main branch')
@@ -220,7 +274,17 @@ def main():
                         help='Name of the original model to compare against (useful for new files)')
     
     args = parser.parse_args()
-    model_path = Path(args.model_path)
+    
+    # Find the model path
+    if Path(args.model_name).exists():
+        model_path = Path(args.model_name)
+    else:
+        model_path = find_model_path(args.model_name)
+        if not model_path:
+            print(f"Error: Could not find model {args.model_name}")
+            sys.exit(1)
+    
+    print(f"Found model at: {model_path}")
     model_dir = model_path.parent
     
     # Handle original model content
