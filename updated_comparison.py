@@ -5,120 +5,8 @@ import argparse
 from pathlib import Path
 import datetime
 import pandas as pd
-import tempfile
-from typing import Tuple, List, Dict
 import sqlalchemy
-
-def get_connection():
-    """Get database connection from dbt profiles. Returns sqlalchemy engine."""
-    try:
-        # Get profile info from dbt
-        result = subprocess.run(
-            ['dbt', 'debug', '--config-dir'],
-            capture_output=True,
-            text=True
-        )
-        # Parse the profile info and create connection
-        # This is a placeholder - you'll need to implement based on your specific database
-        return sqlalchemy.create_engine('your_connection_string')
-    except Exception as e:
-        print(f"Error getting database connection: {e}")
-        sys.exit(1)
-
-def compare_models(engine, original_model: str, changed_model: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Compare two models and return DataFrames with the differences.
-    """
-    # Row count comparison
-    row_counts = pd.read_sql(f"""
-        SELECT 
-            (SELECT COUNT(*) FROM {original_model}) as original_count,
-            (SELECT COUNT(*) FROM {changed_model}) as new_count,
-            (SELECT COUNT(*) FROM {changed_model}) - 
-            (SELECT COUNT(*) FROM {original_model}) as difference
-    """, engine)
-
-    # Column comparison
-    column_changes = pd.read_sql(f"""
-        WITH original_columns AS (
-            SELECT column_name, data_type 
-            FROM information_schema.columns 
-            WHERE table_name = '{original_model}'
-        ),
-        new_columns AS (
-            SELECT column_name, data_type
-            FROM information_schema.columns 
-            WHERE table_name = '{changed_model}'
-        )
-        SELECT 
-            CASE 
-                WHEN o.column_name IS NULL THEN 'Added in new'
-                WHEN n.column_name IS NULL THEN 'Removed in new'
-                WHEN o.data_type != n.data_type THEN 'Type changed'
-                ELSE 'No change'
-            END as change_type,
-            COALESCE(o.column_name, n.column_name) as column_name,
-            o.data_type as original_type,
-            n.data_type as new_type
-        FROM original_columns o
-        FULL OUTER JOIN new_columns n ON o.column_name = n.column_name
-        WHERE o.column_name IS NULL 
-           OR n.column_name IS NULL 
-           OR o.data_type != n.data_type
-    """, engine)
-
-    # Sample differences
-    diffs = pd.read_sql(f"""
-        SELECT 
-            o.*, 
-            n.*
-        FROM {original_model} o
-        FULL OUTER JOIN {changed_model} n USING (case_id)
-        WHERE (o.case_id IS NULL OR n.case_id IS NULL OR EXISTS (
-            SELECT o.*, n.*
-            EXCEPT
-            SELECT n.*, n.*
-        ))
-        LIMIT 5
-    """, engine)
-
-    return row_counts, column_changes, diffs
-
-def save_comparison_results(
-    output_dir: Path,
-    row_counts: pd.DataFrame,
-    column_changes: pd.DataFrame,
-    diffs: pd.DataFrame,
-    original_name: str,
-    changed_name: str):
-    """Save comparison results to CSV files."""
-    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = output_dir / f'comparison_{timestamp}'
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save row count comparison
-    with open(output_dir / 'row_count_comparison.txt', 'w') as f:
-        f.write(f"Comparison between {original_name} and {changed_name}\n")
-        f.write(f"Original count: {row_counts['original_count'].iloc[0]}\n")
-        f.write(f"New count: {row_counts['new_count'].iloc[0]}\n")
-        f.write(f"Difference: {row_counts['difference'].iloc[0]}\n")
-
-    # Save column changes
-    if not column_changes.empty:
-        column_changes.to_csv(output_dir / 'column_changes.csv', index=False)
-        print(f"\nColumn changes saved to: {output_dir / 'column_changes.csv'}")
-    else:
-        print("\nNo column changes found")
-
-    # Save row differences
-    if not diffs.empty:
-        diffs.to_csv(output_dir / 'row_differences.csv', index=False)
-        print(f"Row differences saved to: {output_dir / 'row_differences.csv'}")
-    else:
-        print("No row differences found")
-
-    return output_dir
-
+from typing import Tuple
 
 def find_model_path(model_name):
     """Find the full path to a model."""
@@ -156,9 +44,8 @@ def find_model_path(model_name):
 def get_main_branch_content(model_path):
     """Get content of the file from main branch."""
     try:
-        relative_path = model_path.relative_to(find_dbt_project_root())
         result = subprocess.run(
-            ['git', 'show', f'main:{relative_path}'], 
+            ['git', 'show', f'main:{model_path}'], 
             capture_output=True, 
             text=True,
             check=True
@@ -167,20 +54,8 @@ def get_main_branch_content(model_path):
     except subprocess.CalledProcessError:
         print(f"Warning: Could not find {model_path} in main branch")
         return None
-    except Exception as e:
-        print(f"Error in get_main_branch_content: {str(e)}")
-        return None
 
-def find_dbt_project_root():
-    """Find the root directory of the dbt project."""
-    current = Path.cwd()
-    while current != current.parent:
-        if (current / 'dbt_project.yml').exists():
-            return current
-        current = current.parent
-    return None
-
-def create_temp_model(content, changes, original_name, model_dir):
+def create_temp_model(content, changes, original_name, model_dir) -> Tuple[Path, str]:
     """Create a temporary copy of the model with changes applied."""
     try:
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -203,6 +78,82 @@ def create_temp_model(content, changes, original_name, model_dir):
         print(f"Error in create_temp_model: {str(e)}")
         return None, None
 
+def get_connection():
+    """Get database connection from dbt profiles."""
+    try:
+        # This is a placeholder - implement based on your database
+        return sqlalchemy.create_engine('your_connection_string')
+    except Exception as e:
+        print(f"Error getting database connection: {e}")
+        sys.exit(1)
+
+def compare_models(engine, original_name: str, changed_name: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Compare two models and return comparison DataFrames."""
+    try:
+        # Get column information from both models
+        original_cols = pd.read_sql(f"SELECT * FROM {original_name} LIMIT 0", engine).columns
+        changed_cols = pd.read_sql(f"SELECT * FROM {changed_name} LIMIT 0", engine).columns
+        
+        # Compare row counts
+        row_counts = pd.DataFrame({
+            'Model': ['Original', 'Changed'],
+            'Count': [
+                pd.read_sql(f"SELECT COUNT(*) FROM {original_name}", engine).iloc[0, 0],
+                pd.read_sql(f"SELECT COUNT(*) FROM {changed_name}", engine).iloc[0, 0]
+            ]
+        })
+        
+        # Compare columns
+        all_cols = list(set(original_cols) | set(changed_cols))
+        column_changes = pd.DataFrame({
+            'Column': all_cols,
+            'In_Original': [col in original_cols for col in all_cols],
+            'In_Changed': [col in changed_cols for col in all_cols]
+        })
+        
+        # Sample differences (if models have common columns)
+        common_cols = list(set(original_cols) & set(changed_cols))
+        if common_cols:
+            diffs = pd.read_sql(f"""
+                SELECT DISTINCT *
+                FROM (
+                    SELECT {', '.join(common_cols)} FROM {original_name}
+                    EXCEPT
+                    SELECT {', '.join(common_cols)} FROM {changed_name}
+                ) diff
+                LIMIT 5
+            """, engine)
+        else:
+            diffs = pd.DataFrame()
+        
+        return row_counts, column_changes, diffs
+        
+    except Exception as e:
+        print(f"Error comparing models: {e}")
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+def save_comparison_results(output_dir: Path, original_name: str, changed_name: str,
+                          row_counts: pd.DataFrame, column_changes: pd.DataFrame, diffs: pd.DataFrame):
+    """Save comparison results to CSV files."""
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    result_dir = output_dir / f'comparison_{timestamp}'
+    result_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save summary
+    with open(result_dir / 'summary.txt', 'w') as f:
+        f.write(f"Comparison between {original_name} and {changed_name}\n\n")
+        f.write("Row Counts:\n")
+        f.write(row_counts.to_string())
+        f.write("\n\nColumn Changes:\n")
+        f.write(column_changes.to_string())
+    
+    # Save detailed results
+    if not column_changes.empty:
+        column_changes.to_csv(result_dir / 'column_changes.csv', index=False)
+    if not diffs.empty:
+        diffs.to_csv(result_dir / 'value_differences.csv', index=False)
+    
+    return result_dir
 
 def main():
     parser = argparse.ArgumentParser(description='Test DBT model changes')
@@ -217,48 +168,78 @@ def main():
     
     args = parser.parse_args()
     
+    # Initialize temp model paths and names
+    temp_original_path = None
+    temp_changed_path = None
+    temp_original_name = None
+    temp_changed_name = None
+    
     try:
-        # [Previous model creation code remains the same...]
+        # Find the model path
+        model_path = find_model_path(args.model_path)
+        if not model_path:
+            print(f"Error: Could not find model {args.model_path}")
+            sys.exit(1)
+        
+        print(f"Found model at: {model_path}")
+        model_dir = model_path.parent
+        
+        # Get original content
+        if args.against_main:
+            original_content = get_main_branch_content(model_path)
+            if not original_content:
+                sys.exit(1)
+            original_name = model_path.stem
+        else:
+            with open(model_path, 'r') as f:
+                original_content = f.read()
+            original_name = model_path.stem
+        
+        # Create temporary models
+        temp_original_path, temp_original_name = create_temp_model(
+            original_content, [], original_name, model_dir)
+        print(f"Created temporary original model: {temp_original_path}")
+        
+        # Get changed content
+        with open(model_path, 'r') as f:
+            changed_content = f.read()
+        
+        # Apply changes if any
+        changes = [tuple(change.split(':')) for change in (args.changes or [])]
+        temp_changed_path, temp_changed_name = create_temp_model(
+            changed_content, changes, original_name, model_dir)
+        print(f"Created temporary changed model: {temp_changed_path}")
         
         # Run both models
-        print("Running dbt models...")
-        subprocess.run(['dbt', 'run', '--models', f"{temp_original_name} {temp_changed_name}"])
+        print("\nRunning dbt models...")
+        subprocess.run(['dbt', 'run', '--models', f"{temp_original_name} {temp_changed_name}"], check=True)
         
-        # Get database connection
-        engine = get_connection()
-        
-        # Compare models
+        # Get connection and compare
         print("\nComparing models...")
-        row_counts, column_changes, diffs = compare_models(
-            engine, 
-            temp_original_name, 
-            temp_changed_name
-        )
+        engine = get_connection()
+        row_counts, column_changes, diffs = compare_models(engine, temp_original_name, temp_changed_name)
         
         # Save results
-        output_dir = save_comparison_results(
-            args.output_dir,
-            row_counts,
-            column_changes,
-            diffs,
-            temp_original_name,
-            temp_changed_name
+        print("\nSaving results...")
+        result_dir = save_comparison_results(
+            args.output_dir, temp_original_name, temp_changed_name,
+            row_counts, column_changes, diffs
         )
-        
-        print(f"\nComparison complete! Results saved in: {output_dir}")
+        print(f"Results saved in: {result_dir}")
         
     finally:
         # Cleanup
-        if 'temp_original_path' in locals():
+        if temp_original_path and temp_original_path.exists():
             try:
                 os.remove(temp_original_path)
             except Exception as e:
-                print(f"Note: Temporary file {temp_original_path} will be cleaned up later")
-        if 'temp_changed_path' in locals():
+                print(f"Warning: Could not remove {temp_original_path}: {e}")
+        
+        if temp_changed_path and temp_changed_path.exists():
             try:
                 os.remove(temp_changed_path)
             except Exception as e:
-                print(f"Note: Temporary file {temp_changed_path} will be cleaned up later")
+                print(f"Warning: Could not remove {temp_changed_path}: {e}")
 
 if __name__ == "__main__":
     main()
