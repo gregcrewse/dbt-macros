@@ -7,6 +7,7 @@ import datetime
 import pandas as pd
 import sqlalchemy
 from typing import Tuple
+import psycopg2
 
 def find_model_path(model_name):
     """Find the full path to a model."""
@@ -100,10 +101,37 @@ def create_temp_model(content, changes, original_name, model_dir) -> Tuple[Path,
         return None, None
 
 def get_connection():
-    """Get database connection from dbt profiles."""
+    """Get Redshift connection from dbt profile."""
     try:
-        # This is a placeholder - implement based on your database
-        return sqlalchemy.create_engine('your_connection_string')
+        # Get profile info using dbt debug
+        debug_result = subprocess.run(
+            ['dbt', 'debug', '--target', 'prod'],  # or whatever your target is
+            capture_output=True,
+            text=True
+        )
+        
+        # Parse connection info from profiles.yml
+        home = str(Path.home())
+        profile_path = Path(home) / '.dbt' / 'profiles.yml'
+        
+        if not profile_path.exists():
+            raise Exception(f"Could not find dbt profiles at {profile_path}")
+            
+        import yaml
+        with open(profile_path) as f:
+            profiles = yaml.safe_load(f)
+            
+        # Get the active profile and target
+        with open('dbt_project.yml') as f:
+            project = yaml.safe_load(f)
+            profile_name = project['profile']
+        
+        # Create SQLAlchemy engine for Redshift
+        profile = profiles[profile_name]['outputs']['prod']  # or whatever your target is
+        conn_string = f"postgresql://{profile['user']}:{profile['pass']}@{profile['host']}:{profile['port']}/{profile['dbname']}"
+        
+        return sqlalchemy.create_engine(conn_string)
+            
     except Exception as e:
         print(f"Error getting database connection: {e}")
         sys.exit(1)
