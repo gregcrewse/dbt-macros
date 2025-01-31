@@ -1,23 +1,16 @@
+# model_test.py
 import os
 import sys
 import subprocess
 import argparse
 from pathlib import Path
 import datetime
-import pandas as pd
-import sqlalchemy
-from typing import Tuple
+import json
+import csv
 
 def find_model_path(model_name):
     """Find the full path to a model."""
     try:
-        # First try direct path if it ends in .sql
-        if model_name.endswith('.sql'):
-            path = Path(model_name)
-            if path.exists():
-                return path
-            model_name = path.stem
-        
         # Find project root
         current = Path.cwd()
         while current != current.parent:
@@ -29,13 +22,29 @@ def find_model_path(model_name):
             print("Could not find dbt_project.yml")
             return None
 
-        # Search for the model file
-        models_dir = project_root / 'models'
-        for sql_file in models_dir.rglob('*.sql'):
-            if sql_file.stem == model_name:
-                return sql_file
+        # If full path is provided
+        if model_name.endswith('.sql'):
+            path = Path(model_name)
+            if path.exists():
+                return path
+            model_name = path.stem
 
-        return None
+        # Search for the model file in models directory
+        models_dir = project_root / 'models'
+        matches = list(models_dir.rglob(f"*{model_name}.sql"))
+        
+        if not matches:
+            print(f"Could not find model {model_name}")
+            return None
+            
+        if len(matches) > 1:
+            print(f"Found multiple matches for {model_name}:")
+            for match in matches:
+                print(f"  {match}")
+            print("Please specify the model more precisely")
+            return None
+            
+        return matches[0]
 
     except Exception as e:
         print(f"Error in find_model_path: {str(e)}")
@@ -44,202 +53,282 @@ def find_model_path(model_name):
 def get_main_branch_content(model_path):
     """Get content of the file from main branch."""
     try:
+        # Get the git root directory
+        git_root = subprocess.run(
+            ['git', 'rev-parse', '--show-toplevel'],
+            capture_output=True,
+            text=True,
+            check=True
+        ).stdout.strip()
+        
+        # Convert model_path to be relative to git root
+        git_root_path = Path(git_root)
+        try:
+            relative_path = model_path.relative_to(git_root_path)
+        except ValueError:
+            relative_path = model_path
+        
+        print(f"Looking for file in main branch at: {relative_path}")
+        
         result = subprocess.run(
-            ['git', 'show', f'main:{model_path}'], 
+            ['git', 'show', f'main:{relative_path}'], 
             capture_output=True, 
             text=True,
             check=True
         )
         return result.stdout
-    except subprocess.CalledProcessError:
-        print(f"Warning: Could not find {model_path} in main branch")
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Could not find {relative_path} in main branch")
+        print(f"Git error: {e.stderr.decode()}")
+        return None
+    except Exception as e:
+        print(f"Error accessing main branch content: {str(e)}")
         return None
 
-def create_temp_model(content, changes, original_name, model_dir) -> Tuple[Path, str]:
-    """Create a temporary copy of the model with changes applied."""
+def create_temp_model(content, suffix, original_name, model_dir):
+    """Create a temporary copy of the model."""
     try:
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        temp_name = f"temp_{original_name}_{timestamp}"
+        temp_name = f"temp_{original_name}_{suffix}"
         temp_path = model_dir / f"{temp_name}.sql"
         
-        # Apply changes
-        for old_str, new_str in changes:
-            content = content.replace(old_str, new_str)
-        
-        # Update model name in content
+        # Replace the model name in any ref() calls
         content = content.replace(f"ref('{original_name}')", f"ref('{temp_name}')")
         
-        # Write temp model
         with open(temp_path, 'w') as f:
             f.write(content)
         
         return temp_path, temp_name
     except Exception as e:
-        print(f"Error in create_temp_model: {str(e)}")
+        print(f"Error creating temporary model: {e}")
         return None, None
 
-def get_connection():
-    """Get database connection from dbt profiles."""
-    try:
-        # This is a placeholder - implement based on your database
-        return sqlalchemy.create_engine('your_connection_string')
-    except Exception as e:
-        print(f"Error getting database connection: {e}")
-        sys.exit(1)
+def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
+    """
+    Creates a dbt macro file that will compare the two versions of the model.
+    This macro will be temporarily created in your macros directory and then deleted after use.
+    """
+    macro_content = '''
+{% macro compare_versions() %}
+    {%- set relation1 = ref(\'''' + model1_name + '''\') -%}
+    {%- set relation2 = ref(\'''' + model2_name + '''\') -%}
+    
+    {%- set cols1 = adapter.get_columns_in_relation(relation1) -%}
+    {%- set cols2 = adapter.get_columns_in_relation(relation2) -%}
+    
+    {%- set common_cols = [] -%}
+    {%- set version1_only_cols = [] -%}
+    {%- set version2_only_cols = [] -%}
+    
+    {%- for col1 in cols1 -%}
+        {%- set col_in_version2 = false -%}
+        {%- for col2 in cols2 -%}
+            {%- if col1.name|lower == col2.name|lower -%}
+                {%- do common_cols.append(col1.name) -%}
+                {%- set col_in_version2 = true -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if not col_in_version2 -%}
+            {%- do version1_only_cols.append(col1.name) -%}
+        {%- endif -%}
+    {%- endfor -%}
+    
+    {%- for col2 in cols2 -%}
+        {%- set col_in_version1 = false -%}
+        {%- for col1 in cols1 -%}
+            {%- if col2.name|lower == col1.name|lower -%}
+                {%- set col_in_version1 = true -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if not col_in_version1 -%}
+            {%- do version2_only_cols.append(col2.name) -%}
+        {%- endif -%}
+    {%- endfor -%}
 
-def compare_models(engine, original_name: str, changed_name: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Compare two models and return comparison DataFrames."""
-    try:
-        # Get column information from both models
-        original_cols = pd.read_sql(f"SELECT * FROM {original_name} LIMIT 0", engine).columns
-        changed_cols = pd.read_sql(f"SELECT * FROM {changed_name} LIMIT 0", engine).columns
-        
-        # Compare row counts
-        row_counts = pd.DataFrame({
-            'Model': ['Original', 'Changed'],
-            'Count': [
-                pd.read_sql(f"SELECT COUNT(*) FROM {original_name}", engine).iloc[0, 0],
-                pd.read_sql(f"SELECT COUNT(*) FROM {changed_name}", engine).iloc[0, 0]
-            ]
-        })
-        
-        # Compare columns
-        all_cols = list(set(original_cols) | set(changed_cols))
-        column_changes = pd.DataFrame({
-            'Column': all_cols,
-            'In_Original': [col in original_cols for col in all_cols],
-            'In_Changed': [col in changed_cols for col in all_cols]
-        })
-        
-        # Sample differences (if models have common columns)
-        common_cols = list(set(original_cols) & set(changed_cols))
-        if common_cols:
-            diffs = pd.read_sql(f"""
-                SELECT DISTINCT *
-                FROM (
-                    SELECT {', '.join(common_cols)} FROM {original_name}
-                    EXCEPT
-                    SELECT {', '.join(common_cols)} FROM {changed_name}
-                ) diff
-                LIMIT 5
-            """, engine)
-        else:
-            diffs = pd.DataFrame()
-        
-        return row_counts, column_changes, diffs
-        
-    except Exception as e:
-        print(f"Error comparing models: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    {%- set column_list = common_cols -%}
+    
+    with base_comparison as (
+        select
+            '{{ common_cols|join(",") }}' as common_columns,
+            '{{ version1_only_cols|join(",") }}' as main_only_columns,
+            '{{ version2_only_cols|join(",") }}' as current_only_columns
+    ),
+    version1_stats as (
+        select count(*) as row_count
+        {%- for col in column_list %}
+        , count({{ col }}) as {{ col }}_non_null_count
+        , count(distinct {{ col }}) as {{ col }}_distinct_count
+        {%- endfor %}
+        from {{ relation1 }}
+    ),
+    version2_stats as (
+        select count(*) as row_count
+        {%- for col in column_list %}
+        , count({{ col }}) as {{ col }}_non_null_count
+        , count(distinct {{ col }}) as {{ col }}_distinct_count
+        {%- endfor %}
+        from {{ relation2 }}
+    ),
+    stats_comparison as (
+        select
+            v1.row_count as main_rows,
+            v2.row_count as current_rows,
+            v2.row_count - v1.row_count as row_difference
+            {%- for col in column_list %}
+            , v1.{{ col }}_non_null_count as {{ col }}_main_non_nulls
+            , v2.{{ col }}_non_null_count as {{ col }}_current_non_nulls
+            , v1.{{ col }}_distinct_count as {{ col }}_main_distinct
+            , v2.{{ col }}_distinct_count as {{ col }}_current_distinct
+            {%- endfor %}
+        from version1_stats v1
+        cross join version2_stats v2
+    )
+    
+    select 
+        'Results' as result_type,
+        base_comparison.*,
+        to_json(stats_comparison.*) as statistics
+    from base_comparison
+    cross join stats_comparison
 
-def save_comparison_results(output_dir: Path, original_name: str, changed_name: str,
-                          row_counts: pd.DataFrame, column_changes: pd.DataFrame, diffs: pd.DataFrame):
-    """Save comparison results to CSV files."""
+{% endmacro %}
+'''
+    
+    # Create macros directory if it doesn't exist
+    macros_dir = Path('macros')
+    macros_dir.mkdir(exist_ok=True)
+    
+    # Create the macro file
+    macro_path = macros_dir / 'compare_versions.sql'
+    with open(macro_path, 'w') as f:
+        f.write(macro_content)
+    
+    return macro_path
+
+def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
+    """Save comparison results to files."""
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-    result_dir = output_dir / f'comparison_{timestamp}'
+    result_dir = output_dir / f'{model_name}_comparison_{timestamp}'
     result_dir.mkdir(parents=True, exist_ok=True)
     
-    # Save summary
-    with open(result_dir / 'summary.txt', 'w') as f:
-        f.write(f"Comparison between {original_name} and {changed_name}\n\n")
-        f.write("Row Counts:\n")
-        f.write(row_counts.to_string())
-        f.write("\n\nColumn Changes:\n")
-        f.write(column_changes.to_string())
-    
-    # Save detailed results
-    if not column_changes.empty:
-        column_changes.to_csv(result_dir / 'column_changes.csv', index=False)
-    if not diffs.empty:
-        diffs.to_csv(result_dir / 'value_differences.csv', index=False)
-    
-    return result_dir
+    try:
+        # Parse the results
+        for line in results_json.splitlines():
+            if '"result_type": "Results"' in line:
+                results = json.loads(line)
+                column_changes = json.loads(results['column_changes'])
+                statistics = json.loads(results['statistics'])
+                break
+        
+        # Save summary
+        with open(result_dir / 'summary.txt', 'w') as f:
+            f.write(f"Comparison Results for {model_name}\n")
+            f.write("=" * 50 + "\n\n")
+            
+            f.write("Column Changes:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Common columns: {column_changes['common_columns']}\n")
+            f.write(f"Main branch only: {column_changes['main_only_columns']}\n")
+            f.write(f"Current branch only: {column_changes['current_only_columns']}\n\n")
+            
+            f.write("Row Counts:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Main branch rows: {statistics['main_rows']}\n")
+            f.write(f"Current branch rows: {statistics['current_rows']}\n")
+            f.write(f"Difference: {statistics['row_difference']}\n\n")
+            
+            f.write("Column Statistics:\n")
+            f.write("-" * 20 + "\n")
+            for col in column_changes['common_columns'].split(', '):
+                if col:  # Skip empty strings
+                    f.write(f"\n{col}:\n")
+                    f.write(f"  Non-null counts - Main: {statistics[f'{col}_main_non_nulls']}, ")
+                    f.write(f"Current: {statistics[f'{col}_current_non_nulls']}\n")
+                    f.write(f"  Distinct values - Main: {statistics[f'{col}_main_distinct']}, ")
+                    f.write(f"Current: {statistics[f'{col}_current_distinct']}\n")
+        
+        print(f"\nResults saved to: {result_dir}/summary.txt")
+        return result_dir
+        
+    except Exception as e:
+        print(f"Error saving results: {e}")
+        return None
 
 def main():
-    parser = argparse.ArgumentParser(description='Test DBT model changes')
-    parser.add_argument('model_path', help='Path to the model to test')
-    parser.add_argument('--changes', nargs='+', help='Changes to apply in old:new format')
-    parser.add_argument('--against-main', action='store_true',
-                        help='Compare against version in main branch')
-    parser.add_argument('--original-model', 
-                        help='Name of the original model to compare against (useful for new files)')
+    parser = argparse.ArgumentParser(description='Compare dbt model versions')
+    parser.add_argument('model_name', help='Name of the model to compare')
     parser.add_argument('--output-dir', type=Path, default=Path('model_comparisons'),
                         help='Directory to save comparison results')
     
     args = parser.parse_args()
     
-    # Initialize temp model paths and names
-    temp_original_path = None
-    temp_changed_path = None
-    temp_original_name = None
-    temp_changed_name = None
+    # Initialize paths as None
+    main_path = None
+    current_path = None
+    macro_path = None
     
     try:
-        # Find the model path
-        model_path = find_model_path(args.model_path)
+        # Find the model
+        model_path = find_model_path(args.model_name)
         if not model_path:
-            print(f"Error: Could not find model {args.model_path}")
             sys.exit(1)
         
         print(f"Found model at: {model_path}")
-        model_dir = model_path.parent
         
-        # Get original content
-        if args.against_main:
-            original_content = get_main_branch_content(model_path)
-            if not original_content:
-                sys.exit(1)
-            original_name = model_path.stem
-        else:
-            with open(model_path, 'r') as f:
-                original_content = f.read()
-            original_name = model_path.stem
+        # Get original and main branch content
+        with open(model_path, 'r') as f:
+            current_content = f.read()
+        
+        main_content = get_main_branch_content(model_path)
+        if not main_content:
+            sys.exit(1)
         
         # Create temporary models
-        temp_original_path, temp_original_name = create_temp_model(
-            original_content, [], original_name, model_dir)
-        print(f"Created temporary original model: {temp_original_path}")
+        model_dir = model_path.parent
+        original_name = model_path.stem
         
-        # Get changed content
-        with open(model_path, 'r') as f:
-            changed_content = f.read()
+        main_path, main_name = create_temp_model(
+            main_content, 'main', original_name, model_dir)
+        current_path, current_name = create_temp_model(
+            current_content, 'current', original_name, model_dir)
         
-        # Apply changes if any
-        changes = [tuple(change.split(':')) for change in (args.changes or [])]
-        temp_changed_path, temp_changed_name = create_temp_model(
-            changed_content, changes, original_name, model_dir)
-        print(f"Created temporary changed model: {temp_changed_path}")
+        if not main_path or not current_path:
+            print("Failed to create temporary models")
+            sys.exit(1)
         
-        # Run both models
-        print("\nRunning dbt models...")
-        subprocess.run(['dbt', 'run', '--models', f"{temp_original_name} {temp_changed_name}"], check=True)
+        print(f"Created temporary models: {main_name} and {current_name}")
         
-        # Get connection and compare
-        print("\nComparing models...")
-        engine = get_connection()
-        row_counts, column_changes, diffs = compare_models(engine, temp_original_name, temp_changed_name)
+        # Create comparison macro
+        macro_path = create_comparison_macro(main_name, current_name)
+        if not macro_path:
+            print("Failed to create comparison macro")
+            sys.exit(1)
+        print("Created comparison macro")
+        
+        # Run models
+        print("\nRunning models...")
+        subprocess.run(['dbt', 'run', '--models', f"{main_name} {current_name}"], check=True)
+        
+        # Run comparison
+        print("\nComparing versions...")
+        result = subprocess.run(
+            ['dbt', 'run-operation', 'compare_versions'],
+            capture_output=True,
+            text=True,
+            check=True
+        )
         
         # Save results
-        print("\nSaving results...")
-        result_dir = save_comparison_results(
-            args.output_dir, temp_original_name, temp_changed_name,
-            row_counts, column_changes, diffs
-        )
-        print(f"Results saved in: {result_dir}")
+        save_results(result.stdout, args.output_dir, original_name)
         
     finally:
         # Cleanup
-        if temp_original_path and temp_original_path.exists():
-            try:
-                os.remove(temp_original_path)
-            except Exception as e:
-                print(f"Warning: Could not remove {temp_original_path}: {e}")
-        
-        if temp_changed_path and temp_changed_path.exists():
-            try:
-                os.remove(temp_changed_path)
-            except Exception as e:
-                print(f"Warning: Could not remove {temp_changed_path}: {e}")
+        for path in [main_path, current_path, macro_path]:
+            if path and path.exists():
+                try:
+                    os.remove(path)
+                    print(f"Cleaned up temporary file: {path}")
+                except Exception as e:
+                    print(f"Warning: Could not remove temporary file {path}: {e}")
 
 if __name__ == "__main__":
     main()
