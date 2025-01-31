@@ -7,6 +7,48 @@ import datetime
 import json
 import csv
 
+def find_model_path(model_name):
+    """Find the full path to a model."""
+    try:
+        # Find project root
+        current = Path.cwd()
+        while current != current.parent:
+            if (current / 'dbt_project.yml').exists():
+                project_root = current
+                break
+            current = current.parent
+        else:
+            print("Could not find dbt_project.yml")
+            return None
+
+        # If full path is provided
+        if model_name.endswith('.sql'):
+            path = Path(model_name)
+            if path.exists():
+                return path
+            model_name = path.stem
+
+        # Search for the model file in models directory
+        models_dir = project_root / 'models'
+        matches = list(models_dir.rglob(f"*{model_name}.sql"))
+        
+        if not matches:
+            print(f"Could not find model {model_name}")
+            return None
+            
+        if len(matches) > 1:
+            print(f"Found multiple matches for {model_name}:")
+            for match in matches:
+                print(f"  {match}")
+            print("Please specify the model more precisely")
+            return None
+            
+        return matches[0]
+
+    except Exception as e:
+        print(f"Error in find_model_path: {str(e)}")
+        return None
+
 def get_main_branch_content(model_path):
     """Get content of the file from main branch."""
     try:
@@ -25,6 +67,8 @@ def get_main_branch_content(model_path):
         except ValueError:
             relative_path = model_path
         
+        print(f"Looking for file in main branch at: {relative_path}")
+        
         result = subprocess.run(
             ['git', 'show', f'main:{relative_path}'], 
             capture_output=True, 
@@ -35,6 +79,9 @@ def get_main_branch_content(model_path):
     except subprocess.CalledProcessError as e:
         print(f"Warning: Could not find {relative_path} in main branch")
         print(f"Git error: {e.stderr.decode()}")
+        return None
+    except Exception as e:
+        print(f"Error accessing main branch content: {str(e)}")
         return None
 
 def create_temp_model(content, suffix, original_name, model_dir):
@@ -113,17 +160,10 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
             {{% endfor %}}
         FROM {{{{ ref('{model2_name}') }}}}
     ),
-    column_diffs AS (
-        SELECT 'Column differences' as comparison_type,
-        '{", ".join(common_cols)}' as common_columns,
-        '{", ".join(version1_only_cols)}' as main_branch_only_columns,
-        '{", ".join(version2_only_cols)}' as current_branch_only_columns
-    ),
-    stats_diff AS (
+    results AS (
         SELECT
-            'Statistics' as comparison_type,
-            v1.row_count as main_branch_rows,
-            v2.row_count as current_branch_rows,
+            v1.row_count as main_rows,
+            v2.row_count as current_rows,
             v2.row_count - v1.row_count as row_difference
             {{% for col in common_cols %}}
             , v1.{{ col }}_non_null_count as {{ col }}_main_non_nulls
@@ -134,9 +174,14 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
         FROM version1_stats v1
         CROSS JOIN version2_stats v2
     )
-    SELECT * FROM column_diffs
-    UNION ALL
-    SELECT * FROM stats_diff
+    
+    SELECT 
+        'Results' as result_type,
+        '{{"common_columns": "{", ".join(common_cols)}", 
+          "main_only_columns": "{", ".join(version1_only_cols)}", 
+          "current_only_columns": "{", ".join(version2_only_cols)}"}}' as column_changes,
+        to_json(results.*) as statistics
+    FROM results
 {{% endmacro %}}
 '''
     
@@ -149,14 +194,20 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     
     return macro_path
 
-def save_results(results_json, output_dir: Path, model_name: str):
+def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
     """Save comparison results to CSV files."""
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     result_dir = output_dir / f'{model_name}_comparison_{timestamp}'
     result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        results = json.loads(results_json)
+        # Parse the results
+        for line in results_json.splitlines():
+            if '"result_type": "Results"' in line:
+                results = json.loads(line)
+                column_changes = json.loads(results['column_changes'])
+                statistics = json.loads(results['statistics'])
+                break
         
         # Save summary
         with open(result_dir / 'summary.txt', 'w') as f:
@@ -165,26 +216,27 @@ def save_results(results_json, output_dir: Path, model_name: str):
             
             f.write("Column Changes:\n")
             f.write("-" * 20 + "\n")
-            f.write(f"Common columns: {results['common_columns']}\n")
-            f.write(f"Main branch only: {results['main_branch_only_columns']}\n")
-            f.write(f"Current branch only: {results['current_branch_only_columns']}\n\n")
+            f.write(f"Common columns: {column_changes['common_columns']}\n")
+            f.write(f"Main branch only: {column_changes['main_only_columns']}\n")
+            f.write(f"Current branch only: {column_changes['current_only_columns']}\n\n")
             
             f.write("Row Counts:\n")
             f.write("-" * 20 + "\n")
-            f.write(f"Main branch rows: {results['main_branch_rows']}\n")
-            f.write(f"Current branch rows: {results['current_branch_rows']}\n")
-            f.write(f"Difference: {results['row_difference']}\n")
+            f.write(f"Main branch rows: {statistics['main_rows']}\n")
+            f.write(f"Current branch rows: {statistics['current_rows']}\n")
+            f.write(f"Difference: {statistics['row_difference']}\n\n")
             
-            f.write("\nColumn Statistics:\n")
+            f.write("Column Statistics:\n")
             f.write("-" * 20 + "\n")
-            for col in results['column_stats']:
-                f.write(f"\n{col}:\n")
-                f.write(f"  Non-null counts - Main: {results[f'{col}_main_non_nulls']}, ")
-                f.write(f"Current: {results[f'{col}_current_non_nulls']}\n")
-                f.write(f"  Distinct values - Main: {results[f'{col}_main_distinct']}, ")
-                f.write(f"Current: {results[f'{col}_current_distinct']}\n")
+            for col in column_changes['common_columns'].split(', '):
+                if col:  # Skip empty strings
+                    f.write(f"\n{col}:\n")
+                    f.write(f"  Non-null counts - Main: {statistics[f'{col}_main_non_nulls']}, ")
+                    f.write(f"Current: {statistics[f'{col}_current_non_nulls']}\n")
+                    f.write(f"  Distinct values - Main: {statistics[f'{col}_main_distinct']}, ")
+                    f.write(f"Current: {statistics[f'{col}_current_distinct']}\n")
         
-        print(f"\nResults saved to: {result_dir}")
+        print(f"\nResults saved to: {result_dir}/summary.txt")
         return result_dir
         
     except Exception as e:
@@ -193,14 +245,20 @@ def save_results(results_json, output_dir: Path, model_name: str):
 
 def main():
     parser = argparse.ArgumentParser(description='Compare dbt model versions')
-    parser.add_argument('model_path', help='Path to the model to compare')
+    parser.add_argument('model_name', help='Name of the model to compare')
     parser.add_argument('--output-dir', type=Path, default=Path('model_comparisons'),
                         help='Directory to save comparison results')
     
     args = parser.parse_args()
-    model_path = Path(args.model_path)
     
     try:
+        # Find the model
+        model_path = find_model_path(args.model_name)
+        if not model_path:
+            sys.exit(1)
+        
+        print(f"Found model at: {model_path}")
+        
         # Get original and main branch content
         with open(model_path, 'r') as f:
             current_content = f.read()
@@ -218,26 +276,31 @@ def main():
         current_path, current_name = create_temp_model(
             current_content, 'current', original_name, model_dir)
         
+        if not main_path or not current_path:
+            print("Failed to create temporary models")
+            sys.exit(1)
+        
         print(f"Created temporary models: {main_name} and {current_name}")
         
         # Create comparison macro
         macro_path = create_comparison_macro(main_name, current_name)
         print("Created comparison macro")
         
-        # Run models and comparison
+        # Run models
         print("\nRunning models...")
         subprocess.run(['dbt', 'run', '--models', f"{main_name} {current_name}"], check=True)
         
+        # Run comparison
         print("\nComparing versions...")
         result = subprocess.run(
-            ['dbt', 'run-operation', 'compare_versions', '--log-format', 'json'],
+            ['dbt', 'run-operation', 'compare_versions'],
             capture_output=True,
             text=True,
             check=True
         )
         
         # Save results
-        result_dir = save_results(result.stdout, args.output_dir, original_name)
+        save_results(result.stdout, args.output_dir, original_name)
         
     finally:
         # Cleanup
