@@ -211,46 +211,41 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
     result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Parse the results
+        print("Raw output from dbt:")
+        print(results_json)
+        
+        # Parse the results - look for the JSON in the output
+        results = None
         for line in results_json.splitlines():
             if '"result_type": "Results"' in line:
-                results = json.loads(line)
-                column_changes = json.loads(results['column_changes'])
-                statistics = json.loads(results['statistics'])
+                print("\nFound results line:")
+                print(line)
+                # Extract just the JSON part
+                start = line.find('{')
+                if start != -1:
+                    results = json.loads(line[start:])
                 break
+        
+        if not results:
+            print("Could not find results in dbt output")
+            return None
+        
+        # Save the raw output for debugging
+        with open(result_dir / 'raw_output.txt', 'w') as f:
+            f.write(results_json)
         
         # Save summary
         with open(result_dir / 'summary.txt', 'w') as f:
             f.write(f"Comparison Results for {model_name}\n")
             f.write("=" * 50 + "\n\n")
-            
-            f.write("Column Changes:\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"Common columns: {column_changes['common_columns']}\n")
-            f.write(f"Main branch only: {column_changes['main_only_columns']}\n")
-            f.write(f"Current branch only: {column_changes['current_only_columns']}\n\n")
-            
-            f.write("Row Counts:\n")
-            f.write("-" * 20 + "\n")
-            f.write(f"Main branch rows: {statistics['main_rows']}\n")
-            f.write(f"Current branch rows: {statistics['current_rows']}\n")
-            f.write(f"Difference: {statistics['row_difference']}\n\n")
-            
-            f.write("Column Statistics:\n")
-            f.write("-" * 20 + "\n")
-            for col in column_changes['common_columns'].split(', '):
-                if col:  # Skip empty strings
-                    f.write(f"\n{col}:\n")
-                    f.write(f"  Non-null counts - Main: {statistics[f'{col}_main_non_nulls']}, ")
-                    f.write(f"Current: {statistics[f'{col}_current_non_nulls']}\n")
-                    f.write(f"  Distinct values - Main: {statistics[f'{col}_main_distinct']}, ")
-                    f.write(f"Current: {statistics[f'{col}_current_distinct']}\n")
+            f.write(f"Raw results: {json.dumps(results, indent=2)}\n")
         
-        print(f"\nResults saved to: {result_dir}/summary.txt")
+        print(f"\nResults saved to: {result_dir}")
         return result_dir
         
     except Exception as e:
         print(f"Error saving results: {e}")
+        print(f"Results JSON: {results_json}")
         return None
 
 def main():
