@@ -315,18 +315,26 @@ def main():
             sys.exit(1)
         print("Created comparison macro")
         
-        # Run models
-        print("\nRunning models...")
-        dbt_run_result = subprocess.run(
-            ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev'],
-            capture_output=True,
-            text=True
-        )
-        
         if dbt_run_result.returncode != 0:
-            print("Error running models:")
+            print("\nError running models:")
+            print("\nStandard output:")
+            print(dbt_run_result.stdout)
+            print("\nError output:")
             print(dbt_run_result.stderr)
+            
+            # Print the contents of the temporary files for debugging
+            print("\nContents of main branch model file:")
+            with open(main_path, 'r') as f:
+                print(f.read())
+                
+            print("\nContents of current branch model file:")
+            with open(current_path, 'r') as f:
+                print(f.read())
+                
             sys.exit(1)
+        else:
+            print("Model run output:")
+            print(dbt_run_result.stdout)
         
         # Run comparison
         print("\nComparing versions...")
