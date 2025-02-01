@@ -315,12 +315,21 @@ def main():
             sys.exit(1)
         print("Created comparison macro")
         
-        if dbt_run_result.returncode != 0:
+        # Run models with debug output
+        print("\nRunning models...")
+        try:
+            subprocess.run(
+                ['dbt', '--debug', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev'],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+        except subprocess.CalledProcessError as e:
             print("\nError running models:")
             print("\nStandard output:")
-            print(dbt_run_result.stdout)
+            print(e.stdout)
             print("\nError output:")
-            print(dbt_run_result.stderr)
+            print(e.stderr)
             
             # Print the contents of the temporary files for debugging
             print("\nContents of main branch model file:")
@@ -332,21 +341,22 @@ def main():
                 print(f.read())
                 
             sys.exit(1)
-        else:
-            print("Model run output:")
-            print(dbt_run_result.stdout)
         
         # Run comparison
         print("\nComparing versions...")
-        result = subprocess.run(
-            ['dbt', 'run-operation', 'compare_versions', '--target', 'dev'],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode != 0:
-            print("Error running comparison:")
-            print(result.stderr)
+        try:
+            result = subprocess.run(
+                ['dbt', '--debug', 'run-operation', 'compare_versions', '--target', 'dev'],
+                capture_output=True,
+                text=True,
+                check=True
+            )
+        except subprocess.CalledProcessError as e:
+            print("\nError running comparison:")
+            print("\nStandard output:")
+            print(e.stdout)
+            print("\nError output:")
+            print(e.stderr)
             sys.exit(1)
         
         # Save results
