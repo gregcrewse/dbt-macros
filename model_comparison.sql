@@ -269,17 +269,58 @@ def main():
         print("Running comparison...")
         try:
             result = subprocess.run(
-                ['dbt', 'run-operation', 'compare_versions', '--target', 'dev', '--quiet'],
+                ['dbt', 'run-operation', 'compare_versions', '--target', 'dev'],
                 capture_output=True,
                 text=True,
                 check=True
             )
         except subprocess.CalledProcessError as e:
-            print("\nError running comparison. Check dbt logs for details.")
-            sys.exit(1)
+            print("\nError running comparison.")
+            print("\nCommand output:")
+            print(e.stdout)
+            print("\nError output:")
+            print(e.stderr)
+            try:
+                # Try to get the latest log content
+                log_path = Path('logs/dbt.log')
+                if log_path.exists():
+                    with open(log_path, 'r') as f:
+                        # Read last 20 lines of log
+                        logs = f.readlines()[-20:]
+                        print("\nRelevant log content:")
+                        print(''.join(logs))
+                else:
+                    print("Could not find dbt log file at logs/dbt.log")
+            except Exception as log_error:
+                print(f"Error reading logs: {log_error}")
+            sys.exit(1)        # Run models
+        print("\nRunning models...")
+        dbt_run_result = subprocess.run(
+            ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev', '--debug'],
+            capture_output=True,
+            text=True
+        )
         
-        # Save results
-        save_results(result.stdout, args.output_dir, original_name)
+        if dbt_run_result.returncode != 0:
+            print("\nError running models:")
+            print("\nStandard output:")
+            print(dbt_run_result.stdout)
+            print("\nError output:")
+            print(dbt_run_result.stderr)
+            
+            # Print the contents of the temporary files for debugging
+            print("\nContents of main branch model file:")
+            with open(main_path, 'r') as f:
+                print(f.read())
+                
+            print("\nContents of current branch model file:")
+            with open(current_path, 'r') as f:
+                print(f.read())
+                
+            sys.exit(1)
+        else:
+            print("Model run output:")
+            print(dbt_run_result.stdout)
         
     finally:
         # Cleanup
