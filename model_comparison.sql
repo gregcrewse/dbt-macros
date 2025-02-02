@@ -95,12 +95,30 @@ def create_temp_model(content, suffix, original_name, model_dir):
         analysis_dir.mkdir(exist_ok=True)
         
         temp_path = analysis_dir / f"{temp_name}.sql"
+
+        # Extract all ref() calls using regex
+        import re
+        refs = re.findall(r"ref\(['\"]([^'\"]+)['\"]\)", content)
+        print(f"Found refs: {refs}")
+
+        # Copy the content
+        modified_content = content
+
+        # Only replace the ref for the model we're comparing
+        if original_name in refs:
+            modified_content = re.sub(
+                f"ref\\(['\"]({original_name})['\"]\\)", 
+                f"ref('{temp_name}')", 
+                modified_content
+            )
         
-        # Replace only the model's own name in ref()
-        modified_content = content.replace(
-            f"ref('{original_name}')", 
-            f"ref('{temp_name}')"
-        )
+        # Add config at the top to ensure it's materialized as a table
+        config_block = '''{{
+    config(
+        materialized='table'
+    )
+}}\n\n'''
+        modified_content = config_block + modified_content
         
         with open(temp_path, 'w') as f:
             f.write(modified_content)
