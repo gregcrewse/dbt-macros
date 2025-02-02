@@ -113,101 +113,47 @@ def create_temp_model(content, suffix, original_name, model_dir):
 
 
 def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
-    """
-    Creates a dbt macro file that will compare the two versions of the model.
-    This macro will be temporarily created in your macros directory and then deleted after use.
-    """
+    """Create a macro file for model comparison."""
     macro_content = '''
 {% macro compare_versions() %}
-    {%- set relation1 = ref(\'''' + model1_name + '''\') -%}
-    {%- set relation2 = ref(\'''' + model2_name + '''\') -%}
-    
-    {%- set cols1 = adapter.get_columns_in_relation(relation1) -%}
-    {%- set cols2 = adapter.get_columns_in_relation(relation2) -%}
-    
-    {%- set common_cols = [] -%}
-    {%- set version1_only_cols = [] -%}
-    {%- set version2_only_cols = [] -%}
-    
-    {%- for col1 in cols1 -%}
-        {%- set col_in_version2 = false -%}
-        {%- for col2 in cols2 -%}
-            {%- if col1.name|lower == col2.name|lower -%}
-                {%- do common_cols.append(col1.name) -%}
-                {%- set col_in_version2 = true -%}
-            {%- endif -%}
-        {%- endfor -%}
-        {%- if not col_in_version2 -%}
-            {%- do version1_only_cols.append(col1.name) -%}
-        {%- endif -%}
-    {%- endfor -%}
-    
-    {%- for col2 in cols2 -%}
-        {%- set col_in_version1 = false -%}
-        {%- for col1 in cols1 -%}
-            {%- if col2.name|lower == col1.name|lower -%}
-                {%- set col_in_version1 = true -%}
-            {%- endif -%}
-        {%- endfor -%}
-        {%- if not col_in_version1 -%}
-            {%- do version2_only_cols.append(col2.name) -%}
-        {%- endif -%}
-    {%- endfor -%}
 
-    {%- set column_list = common_cols -%}
-    
-    with base_comparison as (
-        select
-            '{{ common_cols|join(",") }}' as common_columns,
-            '{{ version1_only_cols|join(",") }}' as main_only_columns,
-            '{{ version2_only_cols|join(",") }}' as current_only_columns
-    ),
-    version1_stats as (
-        select count(*) as row_count
-        {%- for col in column_list %}
-        , count({{ col }}) as {{ col }}_non_null_count
-        , count(distinct {{ col }}) as {{ col }}_distinct_count
-        {%- endfor %}
-        from {{ relation1 }}
-    ),
-    version2_stats as (
-        select count(*) as row_count
-        {%- for col in column_list %}
-        , count({{ col }}) as {{ col }}_non_null_count
-        , count(distinct {{ col }}) as {{ col }}_distinct_count
-        {%- endfor %}
-        from {{ relation2 }}
-    ),
-    stats_comparison as (
-        select
-            v1.row_count as main_rows,
-            v2.row_count as current_rows,
-            v2.row_count - v1.row_count as row_difference
-            {%- for col in column_list %}
-            , v1.{{ col }}_non_null_count as {{ col }}_main_non_nulls
-            , v2.{{ col }}_non_null_count as {{ col }}_current_non_nulls
-            , v1.{{ col }}_distinct_count as {{ col }}_main_distinct
-            , v2.{{ col }}_distinct_count as {{ col }}_current_distinct
-            {%- endfor %}
-        from version1_stats v1
-        cross join version2_stats v2
-    )
-    
-    select 
-        'Results' as result_type,
-        base_comparison.*,
-        to_json(stats_comparison.*) as statistics
-    from base_comparison
-    cross join stats_comparison
+    {% set results = run_query("""
+        with version1_stats as (
+            select 
+                count(*) as row_count,
+                {% for column in adapter.get_columns_in_relation(ref(\'''' + model1_name + '''\')) %}
+                count({{ column.name }}) as {{ column.name }}_non_null_count,
+                count(distinct {{ column.name }}) as {{ column.name }}_distinct_count{{ "," if not loop.last }}
+                {% endfor %}
+            from {{ ref(\'''' + model1_name + '''\') }}
+        ),
+        version2_stats as (
+            select 
+                count(*) as row_count,
+                {% for column in adapter.get_columns_in_relation(ref(\'''' + model2_name + '''\')) %}
+                count({{ column.name }}) as {{ column.name }}_non_null_count,
+                count(distinct {{ column.name }}) as {{ column.name }}_distinct_count{{ "," if not loop.last }}
+                {% endfor %}
+            from {{ ref(\'''' + model2_name + '''\') }}
+        )
+        select 
+            version1_stats.row_count as main_row_count,
+            version2_stats.row_count as current_row_count,
+            version2_stats.row_count - version1_stats.row_count as row_difference
+        from version1_stats, version2_stats
+    """) %}
+
+    {% do log(results.columns | string, info=true) %}
+    {% do log(results.rows | string, info=true) %}
+
+    {{ results }}
 
 {% endmacro %}
 '''
     
-    # Create macros directory if it doesn't exist
     macros_dir = Path('macros')
     macros_dir.mkdir(exist_ok=True)
     
-    # Create the macro file
     macro_path = macros_dir / 'compare_versions.sql'
     with open(macro_path, 'w') as f:
         f.write(macro_content)
@@ -221,41 +167,40 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
     result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        print("Raw output from dbt:")
-        print(results_json)
-        
-        # Parse the results - look for the JSON in the output
-        results = None
-        for line in results_json.splitlines():
-            if '"result_type": "Results"' in line:
-                print("\nFound results line:")
-                print(line)
-                # Extract just the JSON part
-                start = line.find('{')
-                if start != -1:
-                    results = json.loads(line[start:])
-                break
-        
-        if not results:
-            print("Could not find results in dbt output")
+        # Find the results in the output
+        row_data = None
+        lines = results_json.splitlines()
+        for i, line in enumerate(lines):
+            if "[" in line and "]" in line:  # Look for the array output
+                try:
+                    # Parse the line containing the results array
+                    row_data = json.loads(line.strip())
+                    break
+                except json.JSONDecodeError:
+                    continue
+
+        if not row_data:
+            print("No comparison data found in output")
             return None
-        
-        # Save the raw output for debugging
-        with open(result_dir / 'raw_output.txt', 'w') as f:
-            f.write(results_json)
-        
+
         # Save summary
         with open(result_dir / 'summary.txt', 'w') as f:
             f.write(f"Comparison Results for {model_name}\n")
             f.write("=" * 50 + "\n\n")
-            f.write(f"Raw results: {json.dumps(results, indent=2)}\n")
+            
+            f.write("Row Counts:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Main branch rows: {row_data[0]['main_row_count']}\n")
+            f.write(f"Current branch rows: {row_data[0]['current_row_count']}\n")
+            f.write(f"Difference: {row_data[0]['row_difference']}\n")
         
-        print(f"\nResults saved to: {result_dir}")
+        print(f"\nResults saved to: {result_dir}/summary.txt")
         return result_dir
         
     except Exception as e:
         print(f"Error saving results: {e}")
-        print(f"Results JSON: {results_json}")
+        print(f"Raw output was:")
+        print(results_json)
         return None
 
 def main():
