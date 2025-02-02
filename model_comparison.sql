@@ -151,52 +151,6 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     with open(macro_path, 'w') as f:
         f.write(macro_content)
     
-    return macro_pathdef create_comparison_macro(model1_name: str, model2_name: str) -> Path:
-    """Create a macro file for model comparison."""
-    macro_content = '''
-{% macro compare_versions() %}
-
-    {% set results = run_query("""
-        with version1_stats as (
-            select 
-                count(*) as row_count,
-                {% for column in adapter.get_columns_in_relation(ref(\'''' + model1_name + '''\')) %}
-                count({{ column.name }}) as {{ column.name }}_non_null_count,
-                count(distinct {{ column.name }}) as {{ column.name }}_distinct_count{{ "," if not loop.last }}
-                {% endfor %}
-            from {{ ref(\'''' + model1_name + '''\') }}
-        ),
-        version2_stats as (
-            select 
-                count(*) as row_count,
-                {% for column in adapter.get_columns_in_relation(ref(\'''' + model2_name + '''\')) %}
-                count({{ column.name }}) as {{ column.name }}_non_null_count,
-                count(distinct {{ column.name }}) as {{ column.name }}_distinct_count{{ "," if not loop.last }}
-                {% endfor %}
-            from {{ ref(\'''' + model2_name + '''\') }}
-        )
-        select 
-            version1_stats.row_count as main_row_count,
-            version2_stats.row_count as current_row_count,
-            version2_stats.row_count - version1_stats.row_count as row_difference
-        from version1_stats, version2_stats
-    """) %}
-
-    {% do log(results.columns | string, info=true) %}
-    {% do log(results.rows | string, info=true) %}
-
-    {{ results }}
-
-{% endmacro %}
-'''
-    
-    macros_dir = Path('macros')
-    macros_dir.mkdir(exist_ok=True)
-    
-    macro_path = macros_dir / 'compare_versions.sql'
-    with open(macro_path, 'w') as f:
-        f.write(macro_content)
-    
     return macro_path
 
 def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
