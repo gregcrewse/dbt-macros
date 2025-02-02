@@ -116,6 +116,45 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     """Create a macro file for model comparison."""
     macro_content = '''
 {% macro compare_versions() %}
+    {% set relation1 = ref(\'''' + model1_name + '''\') %}
+    {% set relation2 = ref(\'''' + model2_name + '''\') %}
+    
+    {% set query %}
+        with version1_stats as (
+            select count(*) as row_count
+            from {{ relation1 }}
+        ),
+        version2_stats as (
+            select count(*) as row_count
+            from {{ relation2 }}
+        )
+        select 
+            version1_stats.row_count as main_row_count,
+            version2_stats.row_count as current_row_count,
+            version2_stats.row_count - version1_stats.row_count as row_difference
+        from version1_stats, version2_stats
+    {% endset %}
+
+    {% set results = run_query(query) %}
+    {% do results.print_table() %}
+    
+    {% do log(results.columns | string, info=true) %}
+    {% do log(results.rows | string, info=true) %}
+
+{% endmacro %}
+'''
+    
+    macros_dir = Path('macros')
+    macros_dir.mkdir(exist_ok=True)
+    
+    macro_path = macros_dir / 'compare_versions.sql'
+    with open(macro_path, 'w') as f:
+        f.write(macro_content)
+    
+    return macro_pathdef create_comparison_macro(model1_name: str, model2_name: str) -> Path:
+    """Create a macro file for model comparison."""
+    macro_content = '''
+{% macro compare_versions() %}
 
     {% set results = run_query("""
         with version1_stats as (
