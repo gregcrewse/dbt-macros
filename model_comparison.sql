@@ -96,16 +96,11 @@ def create_temp_model(content, suffix, original_name, model_dir):
         
         temp_path = analysis_dir / f"{temp_name}.sql"
         
-        # Create config block at the start of the model
-        config_block = '''{{
-            config(
-                materialized="table",
-                schema="dbt_analysis"
-            )
-        }}'''
-        
-    # Replace the model name in any ref() calls and add config block
-        modified_content = config_block + content.replace(f"ref('{original_name}')", f"ref('{temp_name}')")
+        # Replace only the model's own name in ref()
+        modified_content = content.replace(
+            f"ref('{original_name}')", 
+            f"ref('{temp_name}')"
+        )
         
         with open(temp_path, 'w') as f:
             f.write(modified_content)
@@ -115,7 +110,6 @@ def create_temp_model(content, suffix, original_name, model_dir):
     except Exception as e:
         print(f"Error creating temporary model: {e}")
         return None, None
-
 
 
 def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
@@ -313,50 +307,30 @@ def main():
         if not macro_path:
             print("Failed to create comparison macro")
             sys.exit(1)
-        print("Created comparison macro")
         
-        # Run models with debug output
+        # Run models
         print("\nRunning models...")
         try:
             subprocess.run(
-                ['dbt', '--debug', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev'],
+                ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev', '--quiet'],
                 check=True,
-                capture_output=True,
                 text=True
             )
         except subprocess.CalledProcessError as e:
-            print("\nError running models:")
-            print("\nStandard output:")
-            print(e.stdout)
-            print("\nError output:")
-            print(e.stderr)
-            
-            # Print the contents of the temporary files for debugging
-            print("\nContents of main branch model file:")
-            with open(main_path, 'r') as f:
-                print(f.read())
-                
-            print("\nContents of current branch model file:")
-            with open(current_path, 'r') as f:
-                print(f.read())
-                
+            print("\nError running models. Check dbt logs for details.")
             sys.exit(1)
         
         # Run comparison
-        print("\nComparing versions...")
+        print("Running comparison...")
         try:
             result = subprocess.run(
-                ['dbt', '--debug', 'run-operation', 'compare_versions', '--target', 'dev'],
+                ['dbt', 'run-operation', 'compare_versions', '--target', 'dev', '--quiet'],
                 capture_output=True,
                 text=True,
                 check=True
             )
         except subprocess.CalledProcessError as e:
-            print("\nError running comparison:")
-            print("\nStandard output:")
-            print(e.stdout)
-            print("\nError output:")
-            print(e.stderr)
+            print("\nError running comparison. Check dbt logs for details.")
             sys.exit(1)
         
         # Save results
@@ -368,9 +342,8 @@ def main():
             if path and path.exists():
                 try:
                     os.remove(path)
-                    print(f"Cleaned up temporary file: {path}")
                 except Exception as e:
-                    print(f"Warning: Could not remove temporary file {path}: {e}")
+                    pass
 
 if __name__ == "__main__":
     main()
