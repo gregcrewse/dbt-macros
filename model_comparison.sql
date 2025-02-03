@@ -96,29 +96,50 @@ def create_temp_model(content, suffix, original_name, model_dir):
         
         temp_path = analysis_dir / f"{temp_name}.sql"
 
-        # Extract all ref() calls using regex
-        import re
-        refs = re.findall(r"ref\(['\"]([^'\"]+)['\"]\)", content)
-        print(f"Found refs: {refs}")
-
-        # Copy the content
-        modified_content = content
-
-        # Only replace the ref for the model we're comparing
-        if original_name in refs:
-            modified_content = re.sub(
-                f"ref\\(['\"]({original_name})['\"]\\)", 
-                f"ref('{temp_name}')", 
-                modified_content
-            )
-        
-        # Add config at the top to ensure it's materialized as a table
+        # Add config block to ensure dev schema usage
         config_block = '''{{
     config(
-        materialized='table'
+        materialized='table',
+        schema='dev'
     )
-}}\n\n'''
-        modified_content = config_block + modified_content
+}}
+
+-- Force all refs to use dev schema
+{% set target.schema = 'dev' %}
+
+'''
+        # Create the modified content
+        modified_content = config_block + content.replace(f"ref('{original_name}')", f"ref('{temp_name}')")
+        
+        with open(temp_path, 'w') as f:
+            f.write(modified_content)
+        
+        return temp_path, temp_name
+        
+    except Exception as e:
+        print(f"Error creating temporary model: {e}")
+        return None, Nonedef create_temp_model(content, suffix, original_name, model_dir):
+    """Create a temporary copy of the model."""
+    try:
+        temp_name = f"temp_{original_name}_{suffix}"
+        
+        # Create a temporary directory for analysis models if it doesn't exist
+        analysis_dir = model_dir / 'analysis'
+        analysis_dir.mkdir(exist_ok=True)
+        
+        temp_path = analysis_dir / f"{temp_name}.sql"
+        
+        # Create config block at the start of the model
+        config_block = '''{{
+            config(
+                materialized="table",
+                schema="dbt_analysis"
+            )
+        }}
+
+'''
+        # Replace the model name in any ref() calls and add config block
+        modified_content = config_block + content.replace(f"ref('{original_name}')", f"ref('{temp_name}')")
         
         with open(temp_path, 'w') as f:
             f.write(modified_content)
