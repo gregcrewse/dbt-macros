@@ -184,14 +184,9 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
                 count(*) as main_rows,
                 {% for col in common_cols %}
                 count({{ col }}) as main_{{ col }}_non_null,
-                count(distinct {{ col }}) as main_{{ col }}_distinct,
-                {% if adapter.dispatch('can_use_numeric_type')() and adapter.dispatch('is_numeric_type')(cols1[loop.index0].dtype) %}
-                min({{ col }}) as main_{{ col }}_min,
-                max({{ col }}) as main_{{ col }}_max,
-                avg({{ col }})::float as main_{{ col }}_avg,
-                {% endif %}
+                count(distinct {{ col }}) as main_{{ col }}_distinct
+                {% if not loop.last %},{% endif %}
                 {% endfor %}
-                1 as join_key
             from {{ relation1 }}
         ),
         current_counts as (
@@ -199,14 +194,9 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
                 count(*) as current_rows,
                 {% for col in common_cols %}
                 count({{ col }}) as current_{{ col }}_non_null,
-                count(distinct {{ col }}) as current_{{ col }}_distinct,
-                {% if adapter.dispatch('can_use_numeric_type')() and adapter.dispatch('is_numeric_type')(cols2[loop.index0].dtype) %}
-                min({{ col }}) as current_{{ col }}_min,
-                max({{ col }}) as current_{{ col }}_max,
-                avg({{ col }})::float as current_{{ col }}_avg,
-                {% endif %}
+                count(distinct {{ col }}) as current_{{ col }}_distinct
+                {% if not loop.last %},{% endif %}
                 {% endfor %}
-                1 as join_key
             from {{ relation2 }}
         ),
         schema_changes as (
@@ -214,34 +204,22 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
                 '{{ common_cols|join(",") }}' as common_columns,
                 '{{ version1_only_cols|join(",") }}' as removed_columns,
                 '{{ version2_only_cols|join(",") }}' as added_columns,
-                '{{ type_changes|tojson }}' as type_changes,
-                1 as join_key
-        ),
-        final_stats as (
-            select
-                r.main_rows,
-                c.current_rows,
-                c.current_rows - r.main_rows as row_difference,
-                s.*
-                {% for col in common_cols %}
-                , r.main_{{ col }}_non_null
-                , c.current_{{ col }}_non_null
-                , r.main_{{ col }}_distinct
-                , c.current_{{ col }}_distinct
-                {% if adapter.dispatch('can_use_numeric_type')() and adapter.dispatch('is_numeric_type')(cols1[loop.index0].dtype) %}
-                , r.main_{{ col }}_min
-                , c.current_{{ col }}_min
-                , r.main_{{ col }}_max
-                , c.current_{{ col }}_max
-                , r.main_{{ col }}_avg
-                , c.current_{{ col }}_avg
-                {% endif %}
-                {% endfor %}
-            from row_counts r
-            join current_counts c using (join_key)
-            join schema_changes s using (join_key)
+                '{{ type_changes|tojson }}' as type_changes
         )
-        select * from final_stats
+        select
+            r.main_rows,
+            c.current_rows,
+            c.current_rows - r.main_rows as row_difference,
+            s.*
+            {% for col in common_cols %}
+            , r.main_{{ col }}_non_null
+            , c.current_{{ col }}_non_null
+            , r.main_{{ col }}_distinct
+            , c.current_{{ col }}_distinct
+            {% endfor %}
+        from row_counts r
+        cross join current_counts c
+        cross join schema_changes s
     {% endset %}
 
     {% do run_query(query) %}
