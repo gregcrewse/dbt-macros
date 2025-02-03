@@ -215,6 +215,8 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
     result_dir = output_dir / f'{model_name}_comparison_{timestamp}'
     result_dir.mkdir(parents=True, exist_ok=True)
     
+    print(f"\nProcessing results at: {result_dir}")
+    
     try:
         changes = []
         for line in results_json.splitlines():
@@ -222,21 +224,29 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
                 cols = [col.strip() for col in line.split('|') if col.strip()]
                 if cols:
                     changes.append(cols)
+                    print(f"Found data row: {cols}")
         
         if len(changes) >= 2:  # Header row + data row
-            with open(result_dir / 'model_comparison.csv', 'w', newline='') as f:
+            csv_path = result_dir / 'model_comparison.csv'
+            with open(csv_path, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(changes[0])  # Headers
                 writer.writerow(changes[1])  # Data
-                
-            print(f"\nResults saved to: {result_dir}/model_comparison.csv")
+                print(f"Wrote CSV file to: {csv_path}")
+            
+            # Save raw output for debugging
+            with open(result_dir / 'raw_output.txt', 'w') as f:
+                f.write(results_json)
+                print("Saved raw output for debugging")
+        else:
+            print(f"Not enough data rows found. Changes list: {changes}")
+            
         return result_dir
         
     except Exception as e:
         print(f"Error saving results: {e}")
         print("Raw output:", results_json)
         return None
-
 def main():
     parser = argparse.ArgumentParser(description='Compare dbt model versions')
     parser.add_argument('model_name', help='Name of the model to compare')
