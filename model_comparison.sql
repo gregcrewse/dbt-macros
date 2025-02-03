@@ -118,7 +118,7 @@ def create_temp_model(content, suffix, original_name, model_dir):
 
 def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     """Create a macro file for model comparison that returns CSV output."""
-    # Updated macro: run the query, convert the results table to CSV, and return it.
+    # Updated macro: runs the query, converts the results to CSV, and outputs it.
     macro_content = f'''
 {{% macro compare_versions() %}}
     {{% set relation1 = ref('{model1_name}') %}}
@@ -212,12 +212,11 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     {{% set results = run_query(query) %}}
     {{% if results is none %}}
         {{% do log("No results returned", info=True) %}}
-        {{% return("No results returned") %}}
+        No results returned
+    {{% else %}}
+        {{% set agate_table = results.table %}}
+        {{ agate_table.to_csv() }}
     {{% endif %}}
-
-    {{% set agate_table = results.table %}}
-    {{% set csv_output = agate_table.to_csv() %}}
-    {{% return(csv_output) %}}
 {{% endmacro %}}
 '''
     macros_dir = Path('macros')
@@ -314,7 +313,7 @@ def main():
                 ['dbt', 'run', '--models', f"1+{main_name} 1+{current_name}", 
                  '--target', 'redshift_preprod',
                  '--no-defer',
-                 '--vars', '{"schema_override": "uat"}'],
+                 '--vars', '{"schema_override": "_uat"}'],
                 capture_output=True,
                 text=True
             )
@@ -366,5 +365,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
