@@ -123,22 +123,63 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     {% set relation1 = ref(\'''' + model1_name + '''\') %}
     {% set relation2 = ref(\'''' + model2_name + '''\') %}
 
+    {% set cols1 = adapter.get_columns_in_relation(relation1) %}
+    {% set cols2 = adapter.get_columns_in_relation(relation2) %}
+
+    {% set common_cols = [] %}
+    {% set version1_only_cols = [] %}
+    {% set version2_only_cols = [] %}
+    {% set type_changes = [] %}
+
+    {# Find common and unique columns #}
+    {% for col1 in cols1 %}
+        {% set col_in_version2 = false %}
+        {% for col2 in cols2 %}
+            {% if col1.name|lower == col2.name|lower %}
+                {% do common_cols.append(col1.name) %}
+                {% set col_in_version2 = true %}
+                {% if col1.dtype != col2.dtype %}
+                    {% do type_changes.append({
+                        'column': col1.name,
+                        'main_type': col1.dtype,
+                        'current_type': col2.dtype
+                    }) %}
+                {% endif %}
+            {% endif %}
+        {% endfor %}
+        {% if not col_in_version2 %}
+            {% do version1_only_cols.append(col1.name) %}
+        {% endif %}
+    {% endfor %}
+
+    {% for col2 in cols2 %}
+        {% set col_in_version1 = false %}
+        {% for col1 in cols1 %}
+            {% if col2.name|lower == col1.name|lower %}
+                {% set col_in_version1 = true %}
+            {% endif %}
+        {% endfor %}
+        {% if not col_in_version1 %}
+            {% do version2_only_cols.append(col2.name) %}
+        {% endif %}
+    {% endfor %}
+
     {% set query %}
         with row_counts as (
             select
                 count(*) as main_rows
-                {% for col in adapter.get_columns_in_relation(relation1) %}
-                , count("{{ col.name }}") as main_{{ col.name }}_non_null
-                , count(distinct "{{ col.name }}") as main_{{ col.name }}_distinct
+                {% for col in common_cols %}
+                , count("{{ col }}") as main_{{ col }}_non_null
+                , count(distinct "{{ col }}") as main_{{ col }}_distinct
                 {% endfor %}
             from {{ relation1 }}
         ),
         current_counts as (
             select
                 count(*) as current_rows
-                {% for col in adapter.get_columns_in_relation(relation2) %}
-                , count("{{ col.name }}") as current_{{ col.name }}_non_null
-                , count(distinct "{{ col.name }}") as current_{{ col.name }}_distinct
+                {% for col in common_cols %}
+                , count("{{ col }}") as current_{{ col }}_non_null
+                , count(distinct "{{ col }}") as current_{{ col }}_distinct
                 {% endfor %}
             from {{ relation2 }}
         )
@@ -146,19 +187,27 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
             r.main_rows,
             c.current_rows,
             c.current_rows - r.main_rows as row_difference
-            {% for col in adapter.get_columns_in_relation(relation1) %}
-            , r.main_{{ col.name }}_non_null
-            , r.main_{{ col.name }}_distinct
-            {% endfor %}
-            {% for col in adapter.get_columns_in_relation(relation2) %}
-            , c.current_{{ col.name }}_non_null
-            , c.current_{{ col.name }}_distinct
+            {% for col in common_cols %}
+            , r.main_{{ col }}_non_null
+            , c.current_{{ col }}_non_null
+            , r.main_{{ col }}_distinct
+            , c.current_{{ col }}_distinct
             {% endfor %}
         from row_counts r
         cross join current_counts c
     {% endset %}
 
-    {% do run_query(query) %}
+    {% do log('MODEL COMPARISON RESULTS START', info=True) %}
+    {% do log('Schema Changes:', info=True) %}
+    {% do log('Common columns: ' ~ common_cols|join(', '), info=True) %}
+    {% do log('Main branch only columns: ' ~ version1_only_cols|join(', '), info=True) %}
+    {% do log('Current branch only columns: ' ~ version2_only_cols|join(', '), info=True) %}
+    {% do log('Column type changes: ' ~ type_changes|tojson, info=True) %}
+    {% do log('DATA COMPARISON:', info=True) %}
+    {% set results = run_query(query) %}
+    {% do results.print_table() %}
+    {% do log('MODEL COMPARISON RESULTS END', info=True) %}
+
 {% endmacro %}
 '''
     
@@ -172,28 +221,53 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     return macro_path
 
 def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
-    """Save comparison results to files."""
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     result_dir = output_dir / f'{model_name}_comparison_{timestamp}'
     result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Parse CSV output: split by newlines and check for content
-        lines = [line for line in results_json.splitlines() if line.strip()]
-        if not lines or "No results returned" in results_json:
-            print("No comparison data found in output")
-            return None
+        # Parse output sections
+        schema_changes = []
+        data_comparison = []
+        in_results = False
+        in_data = False
         
-        # Save the CSV output as summary.csv
-        with open(result_dir / 'summary.csv', 'w') as f:
+        for line in results_json.splitlines():
+            if 'MODEL COMPARISON RESULTS START' in line:
+                in_results = True
+                continue
+            elif 'DATA COMPARISON:' in line:
+                in_data = True
+                continue
+            elif 'MODEL COMPARISON RESULTS END' in line:
+                break
+                
+            if in_results:
+                if in_data and '|' in line:
+                    data_comparison.append(line)
+                elif not in_data and ':' in line:
+                    schema_changes.append(line)
+        
+        # Save comparison results
+        with open(result_dir / 'model_comparison.txt', 'w') as f:
+            f.write("SCHEMA CHANGES\n")
+            f.write("==============\n")
+            f.write("\n".join(schema_changes))
+            f.write("\n\nDATA COMPARISON\n")
+            f.write("===============\n")
+            f.write("\n".join(data_comparison))
+        
+        print(f"\nResults saved to: {result_dir}/model_comparison.txt")
+        
+        # Save raw output for debugging
+        with open(result_dir / 'raw_output.txt', 'w') as f:
             f.write(results_json)
-        
-        print(f"\nResults saved to: {result_dir}/summary.csv")
+            
         return result_dir
         
     except Exception as e:
         print(f"Error saving results: {e}")
-        print("Raw output was:")
+        print("\nRaw output:")
         print(results_json)
         return None
 
@@ -250,13 +324,15 @@ def main():
         
         # Run models using the redshift_preprod target, disabling defer so all models are rebuilt.
         # Prefix the temporary model names with '1+' to include immediate upstream dependencies.
-        print("\nRunning models in redshift_preprod (with --no-defer and immediate upstream dependencies)...")
+        # Run models
+        print("\nRunning models in redshift_preprod...")
         try:
             model_result = subprocess.run(
-                ['dbt', 'run', '--models', f"1+{main_name} 1+{current_name}", 
+                ['dbt', 'run', '--models', f"+{main_name} +{current_name}", 
                  '--target', 'redshift_preprod',
                  '--no-defer',
-                 '--vars', '{"schema_override": "uat"}'],
+                 '--vars', '{"schema_override": "uat"}',
+                 '--full-refresh'],
                 capture_output=True,
                 text=True
             )
@@ -267,7 +343,7 @@ def main():
                 print("\nError output:")
                 print(model_result.stderr)
                 sys.exit(1)
-            print(model_result.stdout)  # Show successful output
+            print(model_result.stdout)
             
         except Exception as e:
             print(f"Error executing dbt run command: {str(e)}")
