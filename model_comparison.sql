@@ -117,99 +117,51 @@ def create_temp_model(content, suffix, original_name, model_dir):
         return None, None
 
 def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
-    """Create a macro file for model comparison that returns CSV output."""
-    macro_content = f'''
+    """Create a macro file for model comparison."""
+    macro_content = '''
 {% macro compare_versions() %}
-    {% set relation1 = ref('{model1_name}') %}
-    {% set relation2 = ref('{model2_name}') %}
-
-    {% set cols1 = adapter.get_columns_in_relation(relation1) %}
-    {% set cols2 = adapter.get_columns_in_relation(relation2) %}
-
-    {% set common_cols = [] %}
-    {% set version1_only_cols = [] %}
-    {% set version2_only_cols = [] %}
-    {% set type_changes = [] %}
-
-    {# Find common and unique columns #}
-    {% for col1 in cols1 %}
-        {% set col_in_version2 = false %}
-        {% for col2 in cols2 %}
-            {% if col1.name|lower == col2.name|lower %}
-                {% do common_cols.append(col1.name) %}
-                {% set col_in_version2 = true %}
-                {% if col1.dtype != col2.dtype %}
-                    {% do type_changes.append({
-                        'column': col1.name,
-                        'main_type': col1.dtype,
-                        'current_type': col2.dtype
-                    }) %}
-                {% endif %}
-            {% endif %}
-        {% endfor %}
-        {% if not col_in_version2 %}
-            {% do version1_only_cols.append(col1.name) %}
-        {% endif %}
-    {% endfor %}
-
-    {% for col2 in cols2 %}
-        {% set col_in_version1 = false %}
-        {% for col1 in cols1 %}
-            {% if col2.name|lower == col1.name|lower %}
-                {% set col_in_version1 = true %}
-            {% endif %}
-        {% endfor %}
-        {% if not col_in_version1 %}
-            {% do version2_only_cols.append(col2.name) %}
-        {% endif %}
-    {% endfor %}
+    {% set relation1 = ref(\'''' + model1_name + '''\') %}
+    {% set relation2 = ref(\'''' + model2_name + '''\') %}
 
     {% set query %}
         with row_counts as (
             select
-                count(*) as main_rows{% for col in common_cols %},
-                count({{ col }}) as main_{{ col }}_non_null,
-                count(distinct {{ col }}) as main_{{ col }}_distinct{% endfor %}
+                count(*) as main_rows
+                {% for col in adapter.get_columns_in_relation(relation1) %}
+                , count("{{ col.name }}") as main_{{ col.name }}_non_null
+                , count(distinct "{{ col.name }}") as main_{{ col.name }}_distinct
+                {% endfor %}
             from {{ relation1 }}
         ),
         current_counts as (
             select
-                count(*) as current_rows{% for col in common_cols %},
-                count({{ col }}) as current_{{ col }}_non_null,
-                count(distinct {{ col }}) as current_{{ col }}_distinct{% endfor %}
+                count(*) as current_rows
+                {% for col in adapter.get_columns_in_relation(relation2) %}
+                , count("{{ col.name }}") as current_{{ col.name }}_non_null
+                , count(distinct "{{ col.name }}") as current_{{ col.name }}_distinct
+                {% endfor %}
             from {{ relation2 }}
-        ),
-        schema_changes as (
-            select
-                '{{ common_cols|join(",") }}' as common_columns,
-                '{{ version1_only_cols|join(",") }}' as removed_columns,
-                '{{ version2_only_cols|join(",") }}' as added_columns,
-                '{{ type_changes|tojson }}' as type_changes
         )
         select
             r.main_rows,
             c.current_rows,
-            c.current_rows - r.main_rows as row_difference,
-            s.*{% for col in common_cols %},
-            r.main_{{ col }}_non_null,
-            c.current_{{ col }}_non_null,
-            r.main_{{ col }}_distinct,
-            c.current_{{ col }}_distinct{% endfor %}
+            c.current_rows - r.main_rows as row_difference
+            {% for col in adapter.get_columns_in_relation(relation1) %}
+            , r.main_{{ col.name }}_non_null
+            , r.main_{{ col.name }}_distinct
+            {% endfor %}
+            {% for col in adapter.get_columns_in_relation(relation2) %}
+            , c.current_{{ col.name }}_non_null
+            , c.current_{{ col.name }}_distinct
+            {% endfor %}
         from row_counts r
         cross join current_counts c
-        cross join schema_changes s
     {% endset %}
 
-    {% set results = run_query(query) %}
-    {% if results is none %}
-        {% do log("No results returned", info=True) %}
-        No results returned
-    {% else %}
-        {% set agate_table = results.table %}
-        {{ agate_table.to_csv() }}
-    {% endif %}
+    {% do run_query(query) %}
 {% endmacro %}
 '''
+    
     macros_dir = Path('macros')
     macros_dir.mkdir(exist_ok=True)
     
