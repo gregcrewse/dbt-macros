@@ -355,14 +355,15 @@ def main():
             sys.exit(1)
         print("Created comparison macro")
         
-        # Run models using the redshift_preprod target, disabling defer so all models are rebuilt
-        print("\nRunning models in redshift_preprod (with --no-defer)...")
+        # Run models using the redshift_preprod target, disabling defer so all models are rebuilt.
+        # Here we prefix the temporary model names with '1+' to include their immediate upstream dependencies.
+        print("\nRunning models in redshift_preprod (with --no-defer and immediate upstream dependencies)...")
         try:
             model_result = subprocess.run(
-                ['dbt', 'run', '--models', f"{main_name} {current_name}", 
+                ['dbt', 'run', '--models', f"1+{main_name} 1+{current_name}", 
                  '--target', 'redshift_preprod',
                  '--no-defer',
-                 '--vars', '{"schema_override": "wh_uat"}'],
+                 '--vars', '{"schema_override": "bdc_dw"}'],
                 capture_output=True,
                 text=True
             )
@@ -414,4 +415,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
