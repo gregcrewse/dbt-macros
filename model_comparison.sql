@@ -118,106 +118,97 @@ def create_temp_model(content, suffix, original_name, model_dir):
 
 def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     """Create a macro file for model comparison that returns CSV output."""
-    # Updated macro: runs the query, converts the results to CSV, and outputs it.
     macro_content = f'''
-{{% macro compare_versions() %}}
-    {{% set relation1 = ref('{model1_name}') %}}
-    {{% set relation2 = ref('{model2_name}') %}}
+{% macro compare_versions() %}
+    {% set relation1 = ref('{model1_name}') %}
+    {% set relation2 = ref('{model2_name}') %}
 
-    {{% set cols1 = adapter.get_columns_in_relation(relation1) %}}
-    {{% set cols2 = adapter.get_columns_in_relation(relation2) %}}
+    {% set cols1 = adapter.get_columns_in_relation(relation1) %}
+    {% set cols2 = adapter.get_columns_in_relation(relation2) %}
 
-    {{% set common_cols = [] %}}
-    {{% set version1_only_cols = [] %}}
-    {{% set version2_only_cols = [] %}}
-    {{% set type_changes = [] %}}
+    {% set common_cols = [] %}
+    {% set version1_only_cols = [] %}
+    {% set version2_only_cols = [] %}
+    {% set type_changes = [] %}
 
-    {{# Find common and unique columns #}}
-    {{% for col1 in cols1 %}}
-        {{% set col_in_version2 = false %}}
-        {{% for col2 in cols2 %}}
-            {{% if col1.name|lower == col2.name|lower %}}
-                {{% do common_cols.append(col1.name) %}}
-                {{% set col_in_version2 = true %}}
-                {{% if col1.dtype != col2.dtype %}}
-                    {{% do type_changes.append({{
+    {# Find common and unique columns #}
+    {% for col1 in cols1 %}
+        {% set col_in_version2 = false %}
+        {% for col2 in cols2 %}
+            {% if col1.name|lower == col2.name|lower %}
+                {% do common_cols.append(col1.name) %}
+                {% set col_in_version2 = true %}
+                {% if col1.dtype != col2.dtype %}
+                    {% do type_changes.append({
                         'column': col1.name,
                         'main_type': col1.dtype,
                         'current_type': col2.dtype
-                    }}) %}}
-                {{% endif %}}
-            {{% endif %}}
-        {{% endfor %}}
-        {{% if not col_in_version2 %}}
-            {{% do version1_only_cols.append(col1.name) %}}
-        {{% endif %}}
-    {{% endfor %}}
+                    }) %}
+                {% endif %}
+            {% endif %}
+        {% endfor %}
+        {% if not col_in_version2 %}
+            {% do version1_only_cols.append(col1.name) %}
+        {% endif %}
+    {% endfor %}
 
-    {{% for col2 in cols2 %}}
-        {{% set col_in_version1 = false %}}
-        {{% for col1 in cols1 %}}
-            {{% if col2.name|lower == col1.name|lower %}}
-                {{% set col_in_version1 = true %}}
-            {{% endif %}}
-        {{% endfor %}}
-        {{% if not col_in_version1 %}}
-            {{% do version2_only_cols.append(col2.name) %}}
-        {{% endif %}}
-    {{% endfor %}}
+    {% for col2 in cols2 %}
+        {% set col_in_version1 = false %}
+        {% for col1 in cols1 %}
+            {% if col2.name|lower == col1.name|lower %}
+                {% set col_in_version1 = true %}
+            {% endif %}
+        {% endfor %}
+        {% if not col_in_version1 %}
+            {% do version2_only_cols.append(col2.name) %}
+        {% endif %}
+    {% endfor %}
 
-    {{% set query %}}
+    {% set query %}
         with row_counts as (
             select
-                count(*) as main_rows,
-                {{% for col in common_cols %}}
+                count(*) as main_rows{% for col in common_cols %},
                 count({{ col }}) as main_{{ col }}_non_null,
-                count(distinct {{ col }}) as main_{{ col }}_distinct
-                {{% if not loop.last %}},{{% endif %}}
-                {{% endfor %}}
+                count(distinct {{ col }}) as main_{{ col }}_distinct{% endfor %}
             from {{ relation1 }}
         ),
         current_counts as (
             select
-                count(*) as current_rows,
-                {{% for col in common_cols %}}
+                count(*) as current_rows{% for col in common_cols %},
                 count({{ col }}) as current_{{ col }}_non_null,
-                count(distinct {{ col }}) as current_{{ col }}_distinct
-                {{% if not loop.last %}},{{% endif %}}
-                {{% endfor %}}
+                count(distinct {{ col }}) as current_{{ col }}_distinct{% endfor %}
             from {{ relation2 }}
         ),
         schema_changes as (
             select
-                '{{ '{{ common_cols|join(",") }}' }}' as common_columns,
-                '{{ '{{ version1_only_cols|join(",") }}' }}' as removed_columns,
-                '{{ '{{ version2_only_cols|join(",") }}' }}' as added_columns,
-                '{{ '{{ type_changes|tojson }}' }}' as type_changes
+                '{{ common_cols|join(",") }}' as common_columns,
+                '{{ version1_only_cols|join(",") }}' as removed_columns,
+                '{{ version2_only_cols|join(",") }}' as added_columns,
+                '{{ type_changes|tojson }}' as type_changes
         )
         select
             r.main_rows,
             c.current_rows,
             c.current_rows - r.main_rows as row_difference,
-            s.*
-            {{% for col in common_cols %}}
-            , r.main_{{ col }}_non_null
-            , c.current_{{ col }}_non_null
-            , r.main_{{ col }}_distinct
-            , c.current_{{ col }}_distinct
-            {{% endfor %}}
+            s.*{% for col in common_cols %},
+            r.main_{{ col }}_non_null,
+            c.current_{{ col }}_non_null,
+            r.main_{{ col }}_distinct,
+            c.current_{{ col }}_distinct{% endfor %}
         from row_counts r
         cross join current_counts c
         cross join schema_changes s
-    {{% endset %}}
+    {% endset %}
 
-    {{% set results = run_query(query) %}}
-    {{% if results is none %}}
-        {{% do log("No results returned", info=True) %}}
+    {% set results = run_query(query) %}
+    {% if results is none %}
+        {% do log("No results returned", info=True) %}
         No results returned
-    {{% else %}}
-        {{% set agate_table = results.table %}}
+    {% else %}
+        {% set agate_table = results.table %}
         {{ agate_table.to_csv() }}
-    {{% endif %}}
-{{% endmacro %}}
+    {% endif %}
+{% endmacro %}
 '''
     macros_dir = Path('macros')
     macros_dir.mkdir(exist_ok=True)
@@ -235,13 +226,13 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
     result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Parse CSV output: split by newlines, then by comma
+        # Parse CSV output: split by newlines and check for content
         lines = [line for line in results_json.splitlines() if line.strip()]
         if not lines or "No results returned" in results_json:
             print("No comparison data found in output")
             return None
         
-        # For a quick summary, we'll just use the CSV string as is.
+        # Save the CSV output as summary.csv
         with open(result_dir / 'summary.csv', 'w') as f:
             f.write(results_json)
         
@@ -313,7 +304,7 @@ def main():
                 ['dbt', 'run', '--models', f"1+{main_name} 1+{current_name}", 
                  '--target', 'redshift_preprod',
                  '--no-defer',
-                 '--vars', '{"schema_override": "_uat"}'],
+                 '--vars', '{"schema_override": "uat"}'],
                 capture_output=True,
                 text=True
             )
@@ -365,6 +356,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
