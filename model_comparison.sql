@@ -136,29 +136,115 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
 {% macro compare_versions() %}
     {% set relation1 = ref(\'''' + model1_name + '''\') %}
     {% set relation2 = ref(\'''' + model2_name + '''\') %}
-    
+
+    {% set cols1 = adapter.get_columns_in_relation(relation1) %}
+    {% set cols2 = adapter.get_columns_in_relation(relation2) %}
+
+    {% set common_cols = [] %}
+    {% set version1_only_cols = [] %}
+    {% set version2_only_cols = [] %}
+    {% set type_changes = [] %}
+
+    {# Find common and unique columns #}
+    {% for col1 in cols1 %}
+        {% set col_in_version2 = false %}
+        {% for col2 in cols2 %}
+            {% if col1.name|lower == col2.name|lower %}
+                {% do common_cols.append(col1.name) %}
+                {% set col_in_version2 = true %}
+                {% if col1.dtype != col2.dtype %}
+                    {% do type_changes.append({
+                        'column': col1.name,
+                        'main_type': col1.dtype,
+                        'current_type': col2.dtype
+                    }) %}
+                {% endif %}
+            {% endif %}
+        {% endfor %}
+        {% if not col_in_version2 %}
+            {% do version1_only_cols.append(col1.name) %}
+        {% endif %}
+    {% endfor %}
+
+    {% for col2 in cols2 %}
+        {% set col_in_version1 = false %}
+        {% for col1 in cols1 %}
+            {% if col2.name|lower == col1.name|lower %}
+                {% set col_in_version1 = true %}
+            {% endif %}
+        {% endfor %}
+        {% if not col_in_version1 %}
+            {% do version2_only_cols.append(col2.name) %}
+        {% endif %}
+    {% endfor %}
+
     {% set query %}
-        with version1_stats as (
-            select count(*) as row_count
+        with row_counts as (
+            select
+                count(*) as main_rows,
+                {% for col in common_cols %}
+                count({{ col }}) as main_{{ col }}_non_null,
+                count(distinct {{ col }}) as main_{{ col }}_distinct,
+                {% if adapter.dispatch('can_use_numeric_type')() and adapter.dispatch('is_numeric_type')(cols1[loop.index0].dtype) %}
+                min({{ col }}) as main_{{ col }}_min,
+                max({{ col }}) as main_{{ col }}_max,
+                avg({{ col }})::float as main_{{ col }}_avg,
+                {% endif %}
+                {% endfor %}
+                1 as join_key
             from {{ relation1 }}
         ),
-        version2_stats as (
-            select count(*) as row_count
+        current_counts as (
+            select
+                count(*) as current_rows,
+                {% for col in common_cols %}
+                count({{ col }}) as current_{{ col }}_non_null,
+                count(distinct {{ col }}) as current_{{ col }}_distinct,
+                {% if adapter.dispatch('can_use_numeric_type')() and adapter.dispatch('is_numeric_type')(cols2[loop.index0].dtype) %}
+                min({{ col }}) as current_{{ col }}_min,
+                max({{ col }}) as current_{{ col }}_max,
+                avg({{ col }})::float as current_{{ col }}_avg,
+                {% endif %}
+                {% endfor %}
+                1 as join_key
             from {{ relation2 }}
+        ),
+        schema_changes as (
+            select
+                '{{ common_cols|join(",") }}' as common_columns,
+                '{{ version1_only_cols|join(",") }}' as removed_columns,
+                '{{ version2_only_cols|join(",") }}' as added_columns,
+                '{{ type_changes|tojson }}' as type_changes,
+                1 as join_key
+        ),
+        final_stats as (
+            select
+                r.main_rows,
+                c.current_rows,
+                c.current_rows - r.main_rows as row_difference,
+                s.*
+                {% for col in common_cols %}
+                , r.main_{{ col }}_non_null
+                , c.current_{{ col }}_non_null
+                , r.main_{{ col }}_distinct
+                , c.current_{{ col }}_distinct
+                {% if adapter.dispatch('can_use_numeric_type')() and adapter.dispatch('is_numeric_type')(cols1[loop.index0].dtype) %}
+                , r.main_{{ col }}_min
+                , c.current_{{ col }}_min
+                , r.main_{{ col }}_max
+                , c.current_{{ col }}_max
+                , r.main_{{ col }}_avg
+                , c.current_{{ col }}_avg
+                {% endif %}
+                {% endfor %}
+            from row_counts r
+            join current_counts c using (join_key)
+            join schema_changes s using (join_key)
         )
-        select 
-            version1_stats.row_count as main_row_count,
-            version2_stats.row_count as current_row_count,
-            version2_stats.row_count - version1_stats.row_count as row_difference
-        from version1_stats, version2_stats
+        select * from final_stats
     {% endset %}
 
-    {% set results = run_query(query) %}
-    {% do results.print_table() %}
-    
-    {% do log(results.columns | string, info=true) %}
-    {% do log(results.rows | string, info=true) %}
-
+    {% do run_query(query) %}
 {% endmacro %}
 '''
     
@@ -178,19 +264,24 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
     result_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Find the results in the output
-        row_data = None
-        lines = results_json.splitlines()
-        for i, line in enumerate(lines):
-            if "[" in line and "]" in line:  # Look for the array output
-                try:
-                    # Parse the line containing the results array
-                    row_data = json.loads(line.strip())
-                    break
-                except json.JSONDecodeError:
-                    continue
+        # Parse the results
+        results = None
+        for line in results_json.splitlines():
+            if "Row" in line and "|" in line:
+                # Found the results table
+                results = {}
+                headers = None
+                for result_line in results_json.splitlines():
+                    if "|" not in result_line:
+                        continue
+                    columns = [col.strip() for col in result_line.split("|") if col.strip()]
+                    if not headers:
+                        headers = columns
+                        continue
+                    results = dict(zip(headers, columns))
+                break
 
-        if not row_data:
+        if not results:
             print("No comparison data found in output")
             return None
 
@@ -199,11 +290,46 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
             f.write(f"Comparison Results for {model_name}\n")
             f.write("=" * 50 + "\n\n")
             
+            # Basic Stats
             f.write("Row Counts:\n")
             f.write("-" * 20 + "\n")
-            f.write(f"Main branch rows: {row_data[0]['main_row_count']}\n")
-            f.write(f"Current branch rows: {row_data[0]['current_row_count']}\n")
-            f.write(f"Difference: {row_data[0]['row_difference']}\n")
+            f.write(f"Main branch rows: {results['main_rows']}\n")
+            f.write(f"Current branch rows: {results['current_rows']}\n")
+            f.write(f"Difference: {results['row_difference']}\n\n")
+            
+            # Schema Changes
+            f.write("Schema Changes:\n")
+            f.write("-" * 20 + "\n")
+            f.write(f"Common columns: {results['common_columns']}\n")
+            f.write(f"Columns removed: {results['removed_columns']}\n")
+            f.write(f"Columns added: {results['added_columns']}\n")
+            
+            type_changes = json.loads(results['type_changes'])
+            if type_changes:
+                f.write("\nColumn Type Changes:\n")
+                for change in type_changes:
+                    f.write(f"  {change['column']}: {change['main_type']} -> {change['current_type']}\n")
+            
+            # Column Statistics
+            f.write("\nColumn Statistics:\n")
+            f.write("-" * 20 + "\n")
+            common_cols = results['common_columns'].split(',')
+            for col in common_cols:
+                if col:
+                    f.write(f"\n{col}:\n")
+                    f.write(f"  Non-null counts - Main: {results[f'main_{col}_non_null']}, ")
+                    f.write(f"Current: {results[f'current_{col}_non_null']}\n")
+                    f.write(f"  Distinct values - Main: {results[f'main_{col}_distinct']}, ")
+                    f.write(f"Current: {results[f'current_{col}_distinct']}\n")
+                    
+                    # Check if numeric statistics exist
+                    if f'main_{col}_min' in results:
+                        f.write(f"  Min values     - Main: {results[f'main_{col}_min']}, ")
+                        f.write(f"Current: {results[f'current_{col}_min']}\n")
+                        f.write(f"  Max values     - Main: {results[f'main_{col}_max']}, ")
+                        f.write(f"Current: {results[f'current_{col}_max']}\n")
+                        f.write(f"  Average values - Main: {results[f'main_{col}_avg']}, ")
+                        f.write(f"Current: {results[f'current_{col}_avg']}\n")
         
         print(f"\nResults saved to: {result_dir}/summary.txt")
         return result_dir
@@ -263,75 +389,38 @@ def main():
         if not macro_path:
             print("Failed to create comparison macro")
             sys.exit(1)
+        print("Created comparison macro")
         
         # Run models
-        print("\nRunning models...")
+        print("\nRunning models in preprod...")
         try:
             subprocess.run(
-                ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev', '--quiet'],
+                ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'preprod'],
                 check=True,
+                capture_output=True,
                 text=True
             )
         except subprocess.CalledProcessError as e:
-            print("\nError running models. Check dbt logs for details.")
+            print("Error running models:")
+            print(e.stderr)
             sys.exit(1)
         
         # Run comparison
-        print("Running comparison...")
+        print("\nComparing versions...")
         try:
             result = subprocess.run(
-                ['dbt', 'run-operation', 'compare_versions', '--target', 'dev'],
+                ['dbt', 'run-operation', 'compare_versions', '--target', 'preprod'],
                 capture_output=True,
                 text=True,
                 check=True
             )
         except subprocess.CalledProcessError as e:
-            print("\nError running comparison.")
-            print("\nCommand output:")
-            print(e.stdout)
-            print("\nError output:")
+            print("\nError running comparison:")
             print(e.stderr)
-            try:
-                # Try to get the latest log content
-                log_path = Path('logs/dbt.log')
-                if log_path.exists():
-                    with open(log_path, 'r') as f:
-                        # Read last 20 lines of log
-                        logs = f.readlines()[-20:]
-                        print("\nRelevant log content:")
-                        print(''.join(logs))
-                else:
-                    print("Could not find dbt log file at logs/dbt.log")
-            except Exception as log_error:
-                print(f"Error reading logs: {log_error}")
-            sys.exit(1)        # Run models
-        print("\nRunning models...")
-        dbt_run_result = subprocess.run(
-            ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev', '--debug'],
-            capture_output=True,
-            text=True
-        )
-        
-        if dbt_run_result.returncode != 0:
-            print("\nError running models:")
-            print("\nStandard output:")
-            print(dbt_run_result.stdout)
-            print("\nError output:")
-            print(dbt_run_result.stderr)
-            
-            # Print the contents of the temporary files for debugging
-            print("\nContents of main branch model file:")
-            with open(main_path, 'r') as f:
-                print(f.read())
-                
-            print("\nContents of current branch model file:")
-            with open(current_path, 'r') as f:
-                print(f.read())
-                
             sys.exit(1)
-        else:
-            print("Model run output:")
-            print(dbt_run_result.stdout)
+        
+        # Save results
+        save_results(result.stdout, args.output_dir, original_name)
         
     finally:
         # Cleanup
@@ -339,8 +428,9 @@ def main():
             if path and path.exists():
                 try:
                     os.remove(path)
+                    print(f"Cleaned up temporary file: {path}")
                 except Exception as e:
-                    pass
+                    print(f"Warning: Could not remove temporary file {path}: {e}")
 
 if __name__ == "__main__":
     main()
