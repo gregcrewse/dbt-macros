@@ -6,7 +6,6 @@ import argparse
 from pathlib import Path
 import datetime
 import json
-import csv
 
 def find_model_path(model_name):
     """Find the full path to a model."""
@@ -116,7 +115,6 @@ def create_temp_model(content, suffix, original_name, model_dir):
     except Exception as e:
         print(f"Error creating temporary model: {e}")
         return None, None
-
 
 def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     """Create a macro file for model comparison."""
@@ -302,7 +300,7 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
         
     except Exception as e:
         print(f"Error saving results: {e}")
-        print(f"Raw output was:")
+        print("Raw output was:")
         print(results_json)
         return None
 
@@ -357,13 +355,13 @@ def main():
             sys.exit(1)
         print("Created comparison macro")
         
-        # Run models
-        print("\nRunning models in preprod...")
+        # Run models using the redshift_preprod target and proper schema override
+        print("\nRunning models in redshift_preprod...")
         try:
             model_result = subprocess.run(
                 ['dbt', 'run', '--models', f"{main_name} {current_name}", 
-                 '--target', 'preprod',
-                 '--vars', '{"schema_override": "dev"}'],
+                 '--target', 'redshift_preprod',
+                 '--vars', '{"schema_override": "redshift_preprod"}'],
                 capture_output=True,
                 text=True
             )
@@ -384,7 +382,7 @@ def main():
         print("\nComparing versions...")
         try:
             compare_result = subprocess.run(
-                ['dbt', 'run-operation', 'compare_versions', '--target', 'preprod'],
+                ['dbt', 'run-operation', 'compare_versions', '--target', 'redshift_preprod'],
                 capture_output=True,
                 text=True
             )
@@ -404,7 +402,7 @@ def main():
             sys.exit(1)
         
     finally:
-        # Cleanup
+        # Cleanup temporary files
         for path in [main_path, current_path, macro_path]:
             if path and path.exists():
                 try:
@@ -414,21 +412,4 @@ def main():
                     print(f"Warning: Could not remove temporary file {path}: {e}")
 
 if __name__ == "__main__":
-    main()        # Run models
-        print("\nRunning models...")
-        dbt_run_result = subprocess.run(
-            ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev'],
-            capture_output=True,
-            text=True
-        )
-        
-        if dbt_run_result.returncode != 0:
-            print("Error running models:")
-            print("Standard output:")
-            print(dbt_run_result.stdout)
-            print("\nError output:")
-            print(dbt_run_result.stderr)
-            sys.exit(1)
-        else:
-            print("Model run output:")
-            print(dbt_run_result.stdout)
+    main()
