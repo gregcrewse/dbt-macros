@@ -394,33 +394,46 @@ def main():
         # Run models
         print("\nRunning models in preprod...")
         try:
-            subprocess.run(
+            model_result = subprocess.run(
                 ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'preprod'],
-                check=True,
                 capture_output=True,
                 text=True
             )
-        except subprocess.CalledProcessError as e:
-            print("Error running models:")
-            print(e.stderr)
+            if model_result.returncode != 0:
+                print("Error running models:")
+                print("\nStandard output:")
+                print(model_result.stdout)
+                print("\nError output:")
+                print(model_result.stderr)
+                sys.exit(1)
+            print(model_result.stdout)  # Show successful output
+            
+        except Exception as e:
+            print(f"Error executing dbt run command: {str(e)}")
             sys.exit(1)
         
         # Run comparison
         print("\nComparing versions...")
         try:
-            result = subprocess.run(
+            compare_result = subprocess.run(
                 ['dbt', 'run-operation', 'compare_versions', '--target', 'preprod'],
                 capture_output=True,
-                text=True,
-                check=True
+                text=True
             )
-        except subprocess.CalledProcessError as e:
-            print("\nError running comparison:")
-            print(e.stderr)
+            if compare_result.returncode != 0:
+                print("\nError running comparison:")
+                print("\nStandard output:")
+                print(compare_result.stdout)
+                print("\nError output:")
+                print(compare_result.stderr)
+                sys.exit(1)
+            
+            # Save results
+            save_results(compare_result.stdout, args.output_dir, original_name)
+            
+        except Exception as e:
+            print(f"Error executing comparison: {str(e)}")
             sys.exit(1)
-        
-        # Save results
-        save_results(result.stdout, args.output_dir, original_name)
         
     finally:
         # Cleanup
@@ -433,4 +446,21 @@ def main():
                     print(f"Warning: Could not remove temporary file {path}: {e}")
 
 if __name__ == "__main__":
-    main()
+    main()        # Run models
+        print("\nRunning models...")
+        dbt_run_result = subprocess.run(
+            ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'dev'],
+            capture_output=True,
+            text=True
+        )
+        
+        if dbt_run_result.returncode != 0:
+            print("Error running models:")
+            print("Standard output:")
+            print(dbt_run_result.stdout)
+            print("\nError output:")
+            print(dbt_run_result.stderr)
+            sys.exit(1)
+        else:
+            print("Model run output:")
+            print(dbt_run_result.stdout)
