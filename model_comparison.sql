@@ -96,19 +96,13 @@ def create_temp_model(content, suffix, original_name, model_dir):
         
         temp_path = analysis_dir / f"{temp_name}.sql"
 
-        # Add config block to ensure dev schema usage
+        # Add config block to ensure proper materialization
         config_block = '''{{
     config(
         materialized='table',
-        schema='dev'
+        schema=var('schema_override', target.schema)
     )
 }}
-
--- Force all refs to use dev schema
-{%- set schema_override -%}
-{%- set target.schema = 'dev' -%}
-{%- endset -%}
-{{ schema_override }}
 
 '''
         # Create the modified content
@@ -367,7 +361,9 @@ def main():
         print("\nRunning models in preprod...")
         try:
             model_result = subprocess.run(
-                ['dbt', 'run', '--models', f"{main_name} {current_name}", '--target', 'preprod'],
+                ['dbt', 'run', '--models', f"{main_name} {current_name}", 
+                 '--target', 'preprod',
+                 '--vars', '{"schema_override": "dev"}'],
                 capture_output=True,
                 text=True
             )
