@@ -97,7 +97,7 @@ def create_temp_model(content, suffix, original_name, model_dir):
         config_block = '''{{
     config(
         materialized='table',
-        schema=var('schema_override', target.schema)
+        schema='uat'
     )
 }}
 
@@ -277,7 +277,7 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
         print("Raw output sample:")
         print(results_json[:500])  # Print first 500 chars for debugging
         return None
-    
+
 def main():
     parser = argparse.ArgumentParser(description='Compare dbt model versions')
     parser.add_argument('model_name', help='Name of the model to compare')
@@ -330,19 +330,11 @@ def main():
             model_result = subprocess.run(
                 ['dbt', 'run', '--models', f"+{main_name} +{current_name}", 
                  '--target', 'redshift_preprod',
-                 '--no-defer',
-                 '--vars', '{"schema_override": "uat"}',
                  '--full-refresh'],
                 capture_output=True,
-                text=True
+                text=True,
+                check=True  # This will raise an exception if the command fails
             )
-            if model_result.returncode != 0:
-                print("Error running models:")
-                print("\nStandard output:")
-                print(model_result.stdout)
-                print("\nError output:")
-                print(model_result.stderr)
-                sys.exit(1)
             print(model_result.stdout)
             
         except Exception as e:
@@ -354,15 +346,15 @@ def main():
             compare_result = subprocess.run(
                 ['dbt', 'run-operation', 'compare_versions', '--target', 'redshift_preprod'],
                 capture_output=True,
-                text=True
+                text=True,
+                check=True  # This will raise an exception if the command fails
             )
-            if compare_result.returncode != 0:
-                print("\nError running comparison:")
-                print("\nStandard output:")
-                print(compare_result.stdout)
-                print("\nError output:")
-                print(compare_result.stderr)
-                sys.exit(1)
+            
+            # Print the complete output for debugging
+            print("\nComparison operation output:")
+            print(compare_result.stdout)
+            print("\nComparison operation errors (if any):")
+            print(compare_result.stderr)
             
             save_results(compare_result.stdout, args.output_dir, original_name)
             
