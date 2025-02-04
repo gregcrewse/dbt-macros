@@ -199,7 +199,17 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
         cross join current_counts c
     {% endset %}
 
-    {% do run_query(query) %}
+    {% do log('MODEL COMPARISON RESULTS START', info=True) %}
+    {% do log('Schema Changes:', info=True) %}
+    {% do log('Common columns: ' ~ common_cols|join(', '), info=True) %}
+    {% do log('Main branch only columns: ' ~ version1_only_cols|join(', '), info=True) %}
+    {% do log('Current branch only columns: ' ~ version2_only_cols|join(', '), info=True) %}
+    {% do log('Column type changes: ' ~ type_changes|tojson, info=True) %}
+    {% do log('DATA COMPARISON:', info=True) %}
+    {% set results = run_query(query) %}
+    {% do results.print_table() %}
+    {% do log('MODEL COMPARISON RESULTS END', info=True) %}
+
 {% endmacro %}
 '''
     
@@ -211,71 +221,73 @@ def create_comparison_macro(model1_name: str, model2_name: str) -> Path:
     return macro_path
 
 def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
-    """Save comparison results to CSV format.
-    
-    Args:
-        results_json: String output from dbt comparison
-        output_dir: Directory to save results
-        model_name: Name of the model being compared
-        
-    Returns:
-        Path to the results directory
-    """
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     result_dir = output_dir / f'{model_name}_comparison_{timestamp}'
     result_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"\nProcessing results at: {result_dir}")
-    
     try:
-        # Save raw output for debugging
-        with open(result_dir / 'raw_output.txt', 'w') as f:
-            f.write(results_json)
-            print("Saved raw output for debugging")
-
-        # Parse the table output from dbt
-        lines = results_json.split('\n')
-        table_data = []
-        in_table = False
+        # Parse output sections
+        schema_changes = []
+        data_comparison = []
+        in_results = False
+        in_data = False
         
-        for line in lines:
-            # Look for lines that start with the table border
-            if line.strip().startswith('+--') or line.strip().startswith('|'):
-                in_table = True
+        for line in results_json.splitlines():
+            if 'MODEL COMPARISON RESULTS START' in line:
+                in_results = True
+                continue
+            elif 'DATA COMPARISON:' in line:
+                in_data = True
+                continue
+            elif 'MODEL COMPARISON RESULTS END' in line:
+                break
+                
+            if in_results:
+                if in_data and '|' in line:
+                    data_comparison.append(line)
+                elif not in_data and ':' in line:
+                    schema_changes.append(line)
+        
+        # Save text format
+        with open(result_dir / 'model_comparison.txt', 'w') as f:
+            f.write("SCHEMA CHANGES\n")
+            f.write("==============\n")
+            f.write("\n".join(schema_changes))
+            f.write("\n\nDATA COMPARISON\n")
+            f.write("===============\n")
+            f.write("\n".join(data_comparison))
+        
+        # Save CSV format
+        if data_comparison:
+            # Process the table data
+            table_data = []
+            for line in data_comparison:
                 if '|' in line:  # Only process lines that contain actual data
                     # Split by |, strip whitespace, and filter out empty strings
                     row = [col.strip() for col in line.split('|') if col.strip()]
                     if row:  # Only add non-empty rows
                         table_data.append(row)
-            elif in_table:
-                # We've reached the end of the table
-                break
-        
-        print(f"Found {len(table_data)} rows of data")
-        
-        if len(table_data) >= 2:  # We need at least headers and one row of data
-            headers = table_data[0]
-            data_rows = table_data[1:]
             
-            csv_path = result_dir / 'model_comparison.csv'
-            with open(csv_path, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(headers)
-                writer.writerows(data_rows)
-                print(f"Successfully wrote CSV file to: {csv_path}")
-                print(f"Headers: {headers}")
-                print(f"Data rows: {data_rows}")
-        else:
-            print(f"Not enough data rows found. Table data: {table_data}")
-            print("\nRaw output sample:")
-            print(results_json[:500])  # Print first 500 chars for debugging
+            if len(table_data) >= 2:  # Need at least headers and one row
+                csv_path = result_dir / 'model_comparison.csv'
+                with open(csv_path, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(table_data[0])  # Headers
+                    writer.writerows(table_data[1:])  # Data rows
+                print(f"\nCSV results saved to: {csv_path}")
+        
+        print(f"\nResults saved to: {result_dir}")
+        
+        # Save raw output for debugging
+        with open(result_dir / 'raw_output.txt', 'w') as f:
+            f.write(results_json)
             
         return result_dir
         
     except Exception as e:
         print(f"Error saving results: {e}")
-        print("Raw output sample:")
-        print(results_json[:500])  # Print first 500 chars for debugging
+        print("\nRaw output:")
+        print(results_json)
         return None
 
 def main():
