@@ -247,6 +247,7 @@ def save_results(results_json: str, output_dir: Path, model_name: str) -> Path:
         print(f"Error saving results: {e}")
         print("Raw output:", results_json)
         return None
+    
 def main():
     parser = argparse.ArgumentParser(description='Compare dbt model versions')
     parser.add_argument('model_name', help='Name of the model to compare')
